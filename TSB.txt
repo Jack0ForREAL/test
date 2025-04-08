@@ -1,0 +1,605 @@
+-- 993210dood40588
+
+-- Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local wasTppredictionEnabled = false
+
+local teleportOffset = Vector3.new(0, 5, 0) -- Default offset to teleport above the player
+local isOffsetEnabled = true
+
+
+-- Local Player and Workspace
+local LocalPlayer = Players.LocalPlayer
+local PG = game.CoreGui
+local workspace = game.Workspace
+local cam = workspace.CurrentCamera
+
+-- Utility Functions
+local function GetRoot(player)
+    return player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+end
+
+local function GetPing()
+    return (game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue())/1000
+end
+
+local function toggleTeleportOffset()
+    isOffsetEnabled = not isOffsetEnabled
+end
+
+local function PredictionTP(player, method)
+    local root = GetRoot(player)
+    if not root then return end
+    local pos = root.Position + (isOffsetEnabled and teleportOffset or Vector3.new(0, 0, 0))
+    local vel = root.Velocity
+    GetRoot(LocalPlayer).CFrame = CFrame.new(
+        (pos.X) + (vel.X) * (GetPing() * 3.5),
+        (pos.Y) + (vel.Y) * (GetPing() * 2),
+        (pos.Z) + (vel.Z) * (GetPing() * 3.5)
+    )
+    if method == "safe" then
+        task.wait()
+        GetRoot(LocalPlayer).CFrame = CFrame.new(pos)
+        task.wait()
+        GetRoot(LocalPlayer).CFrame = CFrame.new(
+            (pos.X) + (vel.X) * (GetPing() * 3.5),
+            (pos.Y) + (vel.Y) * (GetPing() * 2),
+            (pos.Z) + (vel.Z) * (GetPing() * 3.5)
+        )
+    end
+end
+
+local function ToggleFling(bool)
+    isFlinging = bool -- Track the fling state
+    
+    task.spawn(function()
+        while isFlinging do -- Use isFlinging instead of bool
+            pcall(function()
+                local rootPart = GetRoot(LocalPlayer)
+                if rootPart then
+                    local RVelocity = rootPart.Velocity 
+                    rootPart.Velocity = Vector3.new(math.random(-150, 150), -25000, math.random(-150, 150))
+                    RunService.RenderStepped:Wait()
+                    rootPart.Velocity = RVelocity
+                end
+            end)
+            RunService.Heartbeat:Wait()
+        end
+    end)
+end
+
+-- Function to create the GUI
+local function createGui()
+    -- Check if GUI already exists in PG
+    if PG:FindFirstChild("TeleportGui") then
+        return -- Exit if the GUI already exists
+    end
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Parent = PG
+    screenGui.Name = "TeleportGui"
+	
+	-- Check if GUI2 already exists in PlayerGui
+    if PG:FindFirstChild("ToggleGui") then
+        return -- Exit if the GUI already exists
+    end
+
+
+    -- Create ScreenGui2
+    local screenGui2 = Instance.new("ScreenGui")
+    screenGui2.Parent = PG
+    screenGui2.Name = "ToggleGui"
+
+    -- Create Frame
+    local frame = Instance.new("Frame")
+	frame.Name = "frame"
+    frame.Parent = screenGui
+    frame.Size = UDim2.new(0, 200, 0, 270)
+    frame.Position = UDim2.new(0, 200, 0, 10)
+    frame.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+    frame.BorderSizePixel = 0
+    frame.Draggable = true
+    frame.Active = true
+    frame.Visible = true
+	
+	    -- Create Toggle Button (-)
+    local HideButton = Instance.new("TextButton")
+	HideButton.Name = "HideButton"
+    HideButton.Parent = screenGui2
+    HideButton.Size = UDim2.new(0, 50, 0, 50)
+    HideButton.Text = "-"
+    HideButton.BackgroundColor3 = Color3.new(0.4, 0.4, 0.4)
+    HideButton.TextColor3 = Color3.new(1, 1, 1)
+    HideButton.Draggable = true
+
+    -- Create close button (X)
+    local closeButton = Instance.new("TextButton")
+	closeButton.Name = "closeButton"
+    closeButton.Parent = frame
+    closeButton.Size = UDim2.new(0, 30, 0, 30)
+    closeButton.Position = UDim2.new(0, 200, 0, 0)
+    closeButton.Text = "X"
+    closeButton.BackgroundColor3 = Color3.new(1, 0, 0)
+    closeButton.TextColor3 = Color3.new(1, 1, 1)
+
+    -- Create TextBox for player name input
+    local nameBox = Instance.new("TextBox")
+	nameBox.Name = "nameBox"
+    nameBox.Parent = frame
+    nameBox.Size = UDim2.new(1, -10, 0, 30)
+    nameBox.Position = UDim2.new(0, 5, 0, 5)
+    nameBox.PlaceholderText = "Enter Player Name"
+    nameBox.Text = ""
+    nameBox.BackgroundColor3 = Color3.new(1, 1, 1)
+    nameBox.TextColor3 = Color3.new(0, 0, 0)
+
+    -- Create Toggle Button
+    local toggleButton = Instance.new("TextButton")
+	toggleButton.Name = "toggleButton"
+    toggleButton.Parent = frame
+    toggleButton.Size = UDim2.new(1, -10, 0, 30)
+    toggleButton.Position = UDim2.new(0, 5, 0, 40)
+    toggleButton.Text = "Toggle Teleport: OFF"
+    toggleButton.BackgroundColor3 = Color3.new(1, 0, 0)
+    toggleButton.TextColor3 = Color3.new(1, 1, 1)
+
+    -- Create Void Button
+    local voidButton = Instance.new("TextButton")
+	voidButton.Name = "voidButton"
+    voidButton.Parent = frame
+    voidButton.Size = UDim2.new(1, -10, 0, 30)
+    voidButton.Position = UDim2.new(0, 5, 0, 75)
+    voidButton.Text = "VOID"
+    voidButton.BackgroundColor3 = Color3.new(0.4, 0.4, 0.4)
+    voidButton.TextColor3 = Color3.new(1, 1, 1)
+
+    -- Create Platform Toggle Button
+    local platformToggleButton = Instance.new("TextButton")
+	platformToggleButton.Name = "platformToggleButton"
+    platformToggleButton.Parent = frame
+    platformToggleButton.Size = UDim2.new(1, -10, 0, 30)
+    platformToggleButton.Position = UDim2.new(0, 5, 0, 110)
+    platformToggleButton.Text = "Toggle Platform: OFF"
+    platformToggleButton.BackgroundColor3 = Color3.new(1, 0, 0)
+    platformToggleButton.TextColor3 = Color3.new(1, 1, 1)
+	
+	local offsetToggleButton = Instance.new("TextButton")
+	offsetToggleButton.Name = "offsetToggleButton"
+	offsetToggleButton.Parent = frame
+	offsetToggleButton.Size = UDim2.new(1, -10, 0, 30)
+	offsetToggleButton.Position = UDim2.new(0, 5, 0, 250)
+	offsetToggleButton.Text = "Toggle Offset: OFF"
+	offsetToggleButton.BackgroundColor3 = Color3.new(1, 0, 0)
+	offsetToggleButton.TextColor3 = Color3.new(1, 1, 1)
+	offsetToggleButton.MouseButton1Click:Connect(function()
+		toggleTeleportOffset()
+		offsetToggleButton.Text = "Toggle Offset: " .. (isOffsetEnabled and "ON" or "OFF")
+		offsetToggleButton.BackgroundColor3 = isOffsetEnabled and Color3.new(0, 1, 0) or Color3.new(1, 0, 0)
+	end)
+
+    -- Create TextBox for ping multiplier input
+    local multiplierBox = Instance.new("TextBox")
+	multiplierBox.Name = "multiplierBox"
+    multiplierBox.Parent = frame
+    multiplierBox.Size = UDim2.new(1, -10, 0, 30)
+    multiplierBox.Position = UDim2.new(0, 5, 0, 145)
+    multiplierBox.PlaceholderText = "Enter Ping Multiplier"
+    multiplierBox.Text = "1"
+    multiplierBox.BackgroundColor3 = Color3.new(1, 1, 1)
+    multiplierBox.TextColor3 = Color3.new(0, 0, 0)
+
+    -- Create the Main Button for dropdown
+    local mainButton = Instance.new("TextButton")
+	mainButton.Name = "mainButton"
+    mainButton.Size = UDim2.new(1, -10, 0, 30)
+    mainButton.Position = UDim2.new(0, 5, 0, 215)
+    mainButton.Text = "Show Players"
+    mainButton.BackgroundColor3 = Color3.new(0.4, 0.4, 0.4)
+    mainButton.TextColor3 = Color3.new(1, 1, 1)
+    mainButton.Parent = frame
+
+    -- Create the drop-down menu frame
+    local dropDownMenu = Instance.new("ScrollingFrame")
+	dropDownMenu.Name = "dropDownMenu"
+    dropDownMenu.Size = UDim2.new(1, -10, 0, 120) -- Limited to 4 players (4 * 30 = 120)
+    dropDownMenu.Position = UDim2.new(0, 5, 0, 245)
+    dropDownMenu.Visible = false
+    dropDownMenu.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+    dropDownMenu.BorderSizePixel = 0
+    dropDownMenu.CanvasSize = UDim2.new(0, 0, 0, 0) -- Will be dynamically adjusted
+    dropDownMenu.ScrollBarThickness = 10
+    dropDownMenu.Parent = frame
+	
+	local flingToggleButton = Instance.new("TextButton")
+	flingToggleButton.Name = "flingToggleButton"
+    flingToggleButton.Parent = frame
+    flingToggleButton.Size = UDim2.new(1, -10, 0, 30)
+    flingToggleButton.Position = UDim2.new(0, 5, 0, 180)
+    flingToggleButton.Text = "Toggle Fling: OFF"
+    flingToggleButton.BackgroundColor3 = Color3.new(1, 0, 0)
+    flingToggleButton.TextColor3 = Color3.new(1, 1, 1)
+	
+	HideButton.MouseButton1Click:Connect(function()
+        if frame then
+            frame.Visible = not frame.Visible
+        end
+    end)
+
+	-- close everything
+    closeButton.MouseButton1Click:Connect(function()
+        screenGui:Destroy()
+        if screenGui2 then
+            screenGui2:Destroy()
+        end
+    end)
+
+	local selectedPlayers = {}
+	local isFlingEnabled = false
+	local oldPos = nil
+
+-- Update the oldPos before starting the fling
+local function startFlinging()
+    if isFlingEnabled then
+        oldPos = GetRoot(LocalPlayer).Position
+        ToggleFling(true)
+
+        local playerList = {}
+        for userId, isSelected in pairs(selectedPlayers) do
+            if isSelected then
+                local player = Players:GetPlayerByUserId(userId)
+                if player then
+                    table.insert(playerList, player)
+                end
+            end
+        end
+
+        local function flingPlayer(player)
+            local startTime = tick()
+            repeat
+                local root = GetRoot(player)
+                if root and root.Velocity.Magnitude < 500 then
+                    pcall(function()
+                        PredictionTP(player, "safe")
+                    end)
+                end
+                RunService.Heartbeat:Wait()
+            until not isFlingEnabled or tick() - startTime >= 5 or (root and root.Velocity.Magnitude >= 500)
+        end
+
+        while isFlingEnabled do
+            local allHighVelocity = true
+
+            for _, player in ipairs(playerList) do
+                local root = GetRoot(player)
+                if root and root.Velocity.Magnitude < 500 then
+                    allHighVelocity = false
+                    flingPlayer(player)
+                end
+            end
+
+            if allHighVelocity then
+                GetRoot(LocalPlayer).CFrame = CFrame.new(oldPos)
+                local allLowVelocity = false
+                repeat
+                    for _, player in ipairs(playerList) do
+                        local root = GetRoot(player)
+                        if root and root.Velocity.Magnitude < 500 then
+                            allLowVelocity = true
+                            break
+                        end
+                    end
+                    if not allLowVelocity then
+                        RunService.Heartbeat:Wait()
+                    end
+                until allLowVelocity or not isFlingEnabled
+                
+                -- Update oldPos before starting the fling again
+                oldPos = GetRoot(LocalPlayer).Position
+            end
+        end
+
+        ToggleFling(false)
+        if oldPos then
+            GetRoot(LocalPlayer).CFrame = CFrame.new(oldPos)
+        end
+    end
+end
+
+    flingToggleButton.MouseButton1Click:Connect(function()
+        isFlingEnabled = not isFlingEnabled
+        flingToggleButton.Text = "Toggle Fling: " .. (isFlingEnabled and "ON" or "OFF")
+        flingToggleButton.BackgroundColor3 = isFlingEnabled and Color3.new(0, 1, 0) or Color3.new(1, 0, 0)
+        startFlinging()
+    end)
+
+-- Update createPlayerButton to reflect the changes
+local function createPlayerButton(player, index)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(1, 0, 0, 30)
+    button.Position = UDim2.new(0, 0, 0, index * 30) -- Position each button correctly
+    button.Text = player.Name .. " (" .. player.DisplayName .. ")"
+    button.BackgroundColor3 = selectedPlayers[player.UserId] and Color3.new(0, 1, 0) or Color3.new(1, 0, 0) -- Green if selected, otherwise red
+    button.Parent = dropDownMenu
+
+    -- Toggle button color on click
+    button.MouseButton1Click:Connect(function()
+        selectedPlayers[player.UserId] = not selectedPlayers[player.UserId]
+        button.BackgroundColor3 = selectedPlayers[player.UserId] and Color3.new(0, 1, 0) or Color3.new(1, 0, 0)
+    end)
+end
+
+    -- Function to populate the drop-down menu
+    local function populateDropDownMenu()
+        dropDownMenu:ClearAllChildren() -- Clear existing buttons
+
+        local playerCount = 0
+        for _, player in pairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                createPlayerButton(player, playerCount)
+                playerCount = playerCount + 1
+            end
+        end
+        dropDownMenu.CanvasSize = UDim2.new(0, 0, 0, playerCount * 30)
+    end
+
+    -- Show or hide the drop-down menu on main button click
+    mainButton.MouseButton1Click:Connect(function()
+        if dropDownMenu.Visible then
+            dropDownMenu.Visible = false
+        else
+            populateDropDownMenu()
+            dropDownMenu.Visible = true
+        end
+    end)
+
+    -- Update drop-down menu when players join or leave
+Players.PlayerAdded:Connect(function(player)
+    if selectedPlayers[player.UserId] then
+        selectedPlayers[player.UserId] = player
+    end
+    populateDropDownMenu()
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    if selectedPlayers[player.UserId] then
+        selectedPlayers[player.UserId] = nil
+    end
+    populateDropDownMenu()
+end)
+
+
+    -- Initial population of the drop-down menu
+    populateDropDownMenu()
+
+    local teleportEnabled = false
+    local voidActive = false
+    local targetPlayer = nil
+    local voidPart = nil -- Variable to hold the part for the void area
+    local platformEnabled = false
+    local originalPosition = nil
+    local lagPredictionEnabled = true
+    local pingMultiplier = 1 -- Default multiplier value
+
+    -- Function to find a player by partial name (including display names)
+    local function findPlayerByName(partialName)
+        partialName = partialName:lower()
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player.Name:lower():find(partialName, 1, true) or player.DisplayName:lower():find(partialName, 1, true) then
+                return player
+            end
+        end
+        return nil
+    end
+
+    -- Function to get the player's ping
+    local function GetPing()
+        return (game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue())/1000
+    end
+
+    -- Toggle teleportation
+local function toggleTeleport()
+    if voidActive then return end -- Prevent toggle if Void is active
+    teleportEnabled = not teleportEnabled
+    wasTppredictionEnabled = teleportEnabled -- Track if `tpprediction` was enabled
+
+    if teleportEnabled and not oldPos then
+        -- Save the current position when teleport is toggled on
+        oldPos = GetRoot(LocalPlayer).Position
+    end
+
+    if teleportEnabled then
+        toggleButton.Text = "Toggle Teleport: ON"
+        toggleButton.BackgroundColor3 = Color3.new(0, 1, 0)
+    else
+        -- Return to the saved position when teleport is toggled off
+        if oldPos then
+            GetRoot(LocalPlayer).CFrame = CFrame.new(oldPos)
+        end
+        toggleButton.Text = "Toggle Teleport: OFF"
+        toggleButton.BackgroundColor3 = Color3.new(1, 0, 0)
+    end
+end
+
+
+toggleButton.MouseButton1Click:Connect(toggleTeleport)
+
+    -- Update target player when textbox is updated
+    nameBox.FocusLost:Connect(function(enterPressed)
+        if enterPressed then
+            targetPlayer = findPlayerByName(nameBox.Text)
+            if targetPlayer then
+                nameBox.Text = "Target: " .. targetPlayer.DisplayName
+            else
+                nameBox.Text = "Player not found"
+            end
+        end
+    end)
+
+    -- Update ping multiplier when textbox is updated
+    multiplierBox.FocusLost:Connect(function(enterPressed)
+        if enterPressed then
+            local newMultiplier = tonumber(multiplierBox.Text)
+            if newMultiplier then
+                pingMultiplier = newMultiplier
+                multiplierBox.Text = "Multiplier: " .. tostring(pingMultiplier)
+            else
+                multiplierBox.Text = "Invalid Multiplier"
+            end
+        end
+    end)
+
+    -- Teleportation logic
+    RunService.Heartbeat:Connect(function()
+        if lagPredictionEnabled and teleportEnabled and targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            local targetHRP = targetPlayer.Character.HumanoidRootPart
+            local velocity = targetHRP.Velocity
+            local speed = velocity.Magnitude
+            local direction = velocity.Unit
+            local ping = GetPing()
+
+            if speed < 0.5 then
+                -- Teleport normally behind the player
+                local teleportPosition = targetHRP.Position - (targetHRP.CFrame.LookVector * 5) -- 5 studs behind
+                if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                    LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(teleportPosition)
+                    LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(teleportPosition, targetHRP.Position)
+                end
+            else
+                -- Lag-compensated teleport position using ping
+                local predictionDistance = speed * ping * pingMultiplier -- Distance = Speed * Ping * Multiplier
+                local teleportPosition = targetHRP.Position - (targetHRP.CFrame.LookVector) + (direction * predictionDistance)
+                if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                    local faceDirection = CFrame.new(teleportPosition, teleportPosition + direction)
+                    LocalPlayer.Character.HumanoidRootPart.CFrame = faceDirection
+                end
+            end
+        end
+    end)
+
+-- Void button functionality
+-- Void button functionality
+voidButton.MouseButton1Click:Connect(function()
+    if not voidActive then
+        voidActive = true
+        local returnPos = GetRoot(LocalPlayer).CFrame -- Use current position as return position
+
+        -- Toggle off teleportation if it's enabled and save the state
+        if teleportEnabled then
+		    teleportEnabled = false
+            toggleTeleport()
+        else
+            -- Save the current position if teleport wasn't enabled
+            oldPos = GetRoot(LocalPlayer).Position
+        end
+
+        -- Create and position the large part for the void area
+        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            local rootPart = LocalPlayer.Character.HumanoidRootPart
+
+            -- Create the part that will be the "floor" of the void
+            voidPart = Instance.new("Part")
+            voidPart.Size = Vector3.new(100, 1, 100) -- 100 studs wide
+            voidPart.Position = Vector3.new(670, -492, -4032) -- Position where the void is
+            voidPart.Anchored = true
+            voidPart.CanCollide = true
+            voidPart.Color = Color3.new(0.2, 0.2, 0.2)
+            voidPart.Parent = workspace
+
+            -- Teleport to the void
+            rootPart.CFrame = CFrame.new(voidPart.Position + Vector3.new(0, 4, 0)) -- Positioning above the part
+
+            wait(2)
+
+            -- Return to original position
+            rootPart.CFrame = CFrame.new(oldPos)
+            
+            -- Destroy the void part after returning
+            voidPart:Destroy()
+
+            -- Restore teleportation if it was enabled previously
+            if wasTppredictionEnabled then
+                toggleTeleport()
+            end
+        end
+
+        voidActive = false
+    end
+end)
+
+    -- Toggle platform creation and animation listening
+    local function togglePlatform()
+        platformEnabled = not platformEnabled
+        if platformEnabled then
+            platformToggleButton.Text = "Toggle Platform: ON"
+            platformToggleButton.BackgroundColor3 = Color3.new(0, 1, 0)
+
+            -- Create the platform
+            local function createPlatform()
+                -- Specify the platform's position
+                local platformPosition = Vector3.new(0, -502, 0)
+                
+                -- Create the platform
+                local platform = Instance.new("Part")
+                platform.Size = Vector3.new(20, 1, 20) -- 20 studs wide, 1 stud tall
+                platform.Position = platformPosition
+                platform.Anchored = true -- Ensure it stays in place
+                platform.BrickColor = BrickColor.new("Bright blue") -- Optional: change color
+                platform.Material = Enum.Material.SmoothPlastic -- Optional: set material
+                platform.Name = "StaticPlatform"
+                platform.Parent = workspace
+            end
+            
+            -- Call the function to create the platform
+            createPlatform()
+
+            -- Listen for animations on the LocalPlayer
+            LocalPlayer.Character.Humanoid.Animator.AnimationPlayed:Connect(function(animationTrack)
+                if animationTrack.Animation.AnimationId == "rbxassetid://11343250001" then
+                    -- Remember the current position of the player
+                    local rootPart = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                    if rootPart then
+                        originalPosition = rootPart.CFrame
+
+                        -- Disable lag prediction logic
+                        lagPredictionEnabled = false
+
+                        -- Use RenderStepped to teleport multiple times for 1 second
+                        local startTime = tick()
+                        local connection
+                        connection = RunService.RenderStepped:Connect(function()
+                            if tick() - startTime < 1 then
+                                rootPart.CFrame = CFrame.new(0, -498.6, 0)
+                            else
+                                connection:Disconnect()
+                                -- Wait 3 seconds after teleporting
+                                wait(3)
+                                -- Teleport back to the original position
+                                rootPart.CFrame = originalPosition
+                                -- Find the player's object under workspace.Live using their name
+                                local playerObject = workspace.Live:FindFirstChild(LocalPlayer.Name)
+
+                                -- Check if the player object exists
+                                if playerObject then
+                                    cam.CameraSubject = playerObject
+                                    cam.CameraType = "Track"
+                                else
+                                    warn("Player object not found in workspace.Live")
+                                end
+                            end
+                        end)
+                    end
+                end
+            end)
+        else
+            platformToggleButton.Text = "Toggle Platform: OFF"
+            platformToggleButton.BackgroundColor3 = Color3.new(1, 0, 0)
+        end
+    end
+
+    platformToggleButton.MouseButton1Click:Connect(togglePlatform)
+end
+
+-- Create the GUI once
+createGui()
