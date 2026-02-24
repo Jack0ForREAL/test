@@ -2,6 +2,8 @@
 if _G.Running then return end
 _G.Running = true
 
+local connections = {} 
+
 -- Load External Libraries
 task.spawn(function()
     loadstring(game:HttpGet("https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source"))()
@@ -28,7 +30,8 @@ local Boosters = {
     ["Wealth Clock"] = { pos = Vector3.new(330, 50, 191), collectibles = false, time = 3600 },
     ["Stockings"] = { pos = Vector3.new(232, 38, 232), collectibles = true, time = 3600 },
     ["Onett"] = { pos = Vector3.new(34, 236, -512), collectibles = true, time = 28800 },
-    ["Glue Dispenser"] = { pos = Vector3.new(270, 25258, -722), collectibles = false, time = 79200 }
+    ["Glue Dispenser"] = { pos = Vector3.new(270, 25258, -722), collectibles = false, time = 79200 },
+    ["Gingerbread House"] = { pos = Vector3.new(-201, 6, 96), collectibles = false, time = 7200 }
 }
 
 -- [[ STATE MANAGEMENT ]]
@@ -38,12 +41,105 @@ local crosshairCounter, crosshairBlacklist = 0, {}
 local boosterQueue, boosterPermaIgnore = {}, {}
 local isCheckingBoosters, isConvertingHoney, activeBooster = true, false, false
 local quickRefillCounter, lastEmptiedTime, fullBagTime, waitingForBees = 0, tick(), 0, false
+local lastTimeInField = tick()
 
 local initialHoney = LocalPlayer.CoreStats.Honey.Value
 local initialPollen = LocalPlayer.CoreStats.Pollen.Value
 local startTime = tick()
-local statsBuffer, tilesBuffer = {}, {}
-local lastSaveTime = tick()
+
+-- [[ UI SYSTEM ]]
+local function createUI()
+    local sg = Instance.new("ScreenGui", Players.LocalPlayer.PlayerGui)
+    sg.Name = "BSS_Macro_UI"
+    sg.ResetOnSpawn = false
+
+    local main = Instance.new("Frame", sg)
+    main.Size = UDim2.new(0, 250, 0, 320)
+    main.Position = UDim2.new(0.05, 0, 0.3, 0)
+    main.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+    main.BorderSizePixel = 0
+    main.Active = true
+    main.Draggable = true
+
+    local uiScale = Instance.new("UIScale", main)
+
+    local topbar = Instance.new("Frame", main)
+    topbar.Size = UDim2.new(1, 0, 0, 30)
+    topbar.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    topbar.BorderSizePixel = 0
+
+    local title = Instance.new("TextLabel", topbar)
+    title.Size = UDim2.new(0.7, 0, 1, 0)
+    title.Text = "  BSS TELEMETRY"
+    title.TextColor3 = Color3.new(1, 1, 1)
+    title.BackgroundTransparency = 1
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Font = Enum.Font.Code
+
+    local destroyBtn = Instance.new("TextButton", topbar)
+    destroyBtn.Size = UDim2.new(0.2, 0, 0.8, 0)
+    destroyBtn.Position = UDim2.new(0.78, 0, 0.1, 0)
+    destroyBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+    destroyBtn.Text = "DESTROY"
+    destroyBtn.TextColor3 = Color3.new(1, 1, 1)
+    destroyBtn.Font = Enum.Font.SourceSansBold
+
+    local container = Instance.new("Frame", main)
+    container.Size = UDim2.new(0.9, 0, 0.75, 0)
+    container.Position = UDim2.new(0.05, 0, 0.12, 0)
+    container.BackgroundTransparency = 1
+
+    local function createLabel(text, color)
+        local l = Instance.new("TextLabel", container)
+        l.Size = UDim2.new(1, 0, 0, 20)
+        l.Text = text
+        l.TextColor3 = color or Color3.new(1, 1, 1)
+        l.BackgroundTransparency = 1
+        l.TextXAlignment = Enum.TextXAlignment.Left
+        l.Font = Enum.Font.Code
+        l.TextScaled = true
+        return l
+    end
+
+    local stats = {
+        hS = createLabel("Honey/s: 0"),
+        hM = createLabel("Honey/m: 0"),
+        hH = createLabel("Honey/h: 0"),
+        pS = createLabel("Pollen/s: 0", Color3.fromRGB(150, 255, 150)),
+        pM = createLabel("Pollen/m: 0", Color3.fromRGB(150, 255, 150)),
+        pH = createLabel("Pollen/h: 0", Color3.fromRGB(150, 255, 150)),
+        total = createLabel("Total: 0", Color3.new(1, 0.8, 0)),
+        time = createLabel("Elapsed: 00:00:00")
+    }
+
+    local listLayout = Instance.new("UIListLayout", container)
+    listLayout.Padding = UDim.new(0, 5)
+
+    local scaleInput = Instance.new("TextBox", main)
+    scaleInput.Size = UDim2.new(0.9, 0, 0, 25)
+    scaleInput.Position = UDim2.new(0.05, 0, 0.9, 0)
+    scaleInput.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    scaleInput.Text = "Scale: 1.0"
+    scaleInput.TextColor3 = Color3.new(1,1,1)
+    scaleInput.Font = Enum.Font.Code
+
+    scaleInput.FocusLost:Connect(function()
+        local val = tonumber(scaleInput.Text:match("[%d%.]+"))
+        if val then uiScale.Scale = math.clamp(val, 0.5, 3) end
+        scaleInput.Text = "Scale: " .. tostring(uiScale.Scale)
+    end)
+
+    destroyBtn.MouseButton1Click:Connect(function()
+        _G.Running = false
+        for _, c in pairs(connections) do c:Disconnect() end
+        sg:Destroy()
+        print("Script Destroyed. You can re-execute now.")
+    end)
+
+    return stats, sg
+end
+
+local UI_Stats, MainGui = createUI()
 
 -- [[ UTILITIES ]]
 local function formatNumber(num)
@@ -51,27 +147,23 @@ local function formatNumber(num)
     return formatted:reverse():gsub("^,", "")
 end
 
-local function killMomentum()
-    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if hrp then hrp.Velocity, hrp.RotVelocity = Vector3.zero, Vector3.zero end
+local function isWithinField(pos)
+    return pos.X >= fieldBounds.x1 and pos.X <= fieldBounds.x2 and pos.Z >= fieldBounds.z1 and pos.Z <= fieldBounds.z2
 end
 
 local function teleportTo(pos)
     local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if hrp then killMomentum(); hrp.CFrame = CFrame.new(pos) end
+    if hrp then 
+        hrp.Velocity = Vector3.zero
+        hrp.RotVelocity = Vector3.zero
+        hrp.CFrame = CFrame.new(pos) 
+    end
 end
 
 local function hasTokenRotatedUp(part)
     if not part or not part.Parent then return true end
     local x, z = math.abs(part.Orientation.X), math.abs(part.Orientation.Z)
-    return x > 25 or z > 25 -- Token is tilted/flying
-end
-
-local function getClampedOvershoot(playerPos, targetPos)
-    local dir = (targetPos - playerPos).Unit
-    if dir.X ~= dir.X then dir = Vector3.new(0,0,-1) end
-    local raw = targetPos + (dir * 4)
-    return Vector3.new(math.clamp(raw.X, fieldBounds.x1, fieldBounds.x2), playerPos.Y, math.clamp(raw.Z, fieldBounds.z1, fieldBounds.z2))
+    return x > 25 or z > 25
 end
 
 -- [[ BOOSTER LOGIC ]]
@@ -90,6 +182,8 @@ local function checkBoosters()
         local bg = btn.BackgroundColor3
         local r, g, b = math.round(bg.R*255), math.round(bg.G*255), math.round(bg.B*255)
         local cd = parseCooldown(btn.TextBox.Text)
+        
+        -- Logic: If red button (201, 39, 28) and no time found, ignore.
         if r == 201 and g == 39 and b == 28 and not cd then
             boosterPermaIgnore[name] = true
         elseif cd then
@@ -101,47 +195,24 @@ local function checkBoosters()
     isCheckingBoosters = false; teleportTo(fieldCenter)
 end
 
--- [[ DISK LOGIC ]]
-local function addDisk(p)
-    for _, d in ipairs(warningDisks.disks) do if d.part == p then return end end
-    table.insert(warningDisks.disks, {part = p})
-    table.sort(warningDisks.disks, function(a,b) return (1-a.part.Transparency) > (1-b.part.Transparency) end)
-end
-
-local function processDisks()
-    if warningDisks.processingDisks or #warningDisks.disks == 0 then return end
-    warningDisks.processingDisks = true
-    task.spawn(function()
-        while #warningDisks.disks > 0 do
-            local d = warningDisks.disks[1]
-            if d.part and d.part.Parent then
-                teleportTo(d.part.Position)
-                while d.part and d.part.Parent and d.part.Transparency > 0.05 do task.wait() end
-                task.wait(0.07) -- Perfect ping delay
-            end
-            table.remove(warningDisks.disks, 1)
-        end
-        warningDisks.processingDisks = false
-    end)
-end
-
--- [[ COLLECTIBLE SCANNER ]]
+-- [[ MOVEMENT & FARMING ]]
 local function getCollectibles()
     local res = {}
     for _, p in ipairs(workspace.Collectibles:GetChildren()) do
         if p:IsA("Part") and not verifyingTokens[p] and not permaIgnore[p] then
             if not tokenSpawnTimes[p] then tokenSpawnTimes[p] = tick() end
             if tick() - tokenSpawnTimes[p] > 30 then permaIgnore[p] = true else
-                if p.Position.X >= fieldBounds.x1 and p.Position.X <= fieldBounds.x2 and p.Position.Z >= fieldBounds.z1 and p.Position.Z <= fieldBounds.z2 then
-                    table.insert(res, {part = p, priority = 4, type = "Token"})
-                end
+                if isWithinField(p.Position) then table.insert(res, {part = p, priority = 4, type = "Token"}) end
             end
         end
     end
     local parts = workspace:FindFirstChild("Particles")
     if parts then
         for _, p in ipairs(parts:GetChildren()) do
-            if p.Name == "WarningDisk" and p.Size.X <= 8 then addDisk(p)
+            if p.Name == "WarningDisk" and p.Size.X <= 8 then 
+                local exists = false
+                for _, d in ipairs(warningDisks.disks) do if d.part == p then exists = true break end end
+                if not exists then table.insert(warningDisks.disks, {part = p}) end
             elseif p.Name == "Crosshair" and not crosshairBlacklist[p] then
                 crosshairCounter = crosshairCounter + 1
                 if crosshairCounter % 3 == 0 then crosshairBlacklist[p] = true
@@ -153,47 +224,67 @@ local function getCollectibles()
     return res
 end
 
--- [[ HEARTBEAT LOOPS ]]
-RunService.Heartbeat:Connect(function()
+-- [[ CORE LOOPS ]]
+table.insert(connections, RunService.Heartbeat:Connect(function()
+    if not _G.Running then return end
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    -- Safety Stuck Check: If not in field for 10s while supposed to farm, teleport back.
+    if not isCheckingBoosters and not activeBooster and not isConvertingHoney then
+        if isWithinField(hrp.Position) then
+            lastTimeInField = tick()
+        elseif tick() - lastTimeInField > 10 then
+            teleportTo(fieldCenter)
+            lastTimeInField = tick()
+        end
+    end
+
+    -- Verify Tokens
     for t, time in pairs(verifyingTokens) do
         if not t.Parent or hasTokenRotatedUp(t) or tick() - time > 1 then verifyingTokens[t] = nil end
     end
-end)
+end))
 
-RunService.RenderStepped:Connect(function()
+table.insert(connections, RunService.RenderStepped:Connect(function()
+    if not _G.Running then return end
     local char = LocalPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChild("Humanoid")
     if not hrp or isCheckingBoosters or activeBooster then return end
 
-    -- 1. HARD LOCK: DISKS
-    if #warningDisks.disks > 0 or warningDisks.processingDisks then
-        processDisks(); return 
+    -- Hard Lock: Warning Disks (Prioritize Meteors)
+    if #warningDisks.disks > 0 then
+        local d = warningDisks.disks[1]
+        if d.part and d.part.Parent then
+            teleportTo(d.part.Position)
+            if d.part.Transparency <= 0.05 then task.wait(0.07) table.remove(warningDisks.disks, 1) end
+        else table.remove(warningDisks.disks, 1) end
+        return
     end
 
-    -- 2. BAG SYSTEM
+    -- Bag System & Conversion
     local pollen, cap = LocalPlayer.CoreStats.Pollen.Value, LocalPlayer.CoreStats.Capacity.Value
     if not isConvertingHoney then
         if pollen >= cap then
-            if not waitingForBees then 
-                waitingForBees = true; fullBagTime = tick()
-                if tick() - lastEmptiedTime < 5 then quickRefillCounter = quickRefillCounter + 1 else quickRefillCounter = 0 end
-            end
-            if quickRefillCounter >= 5 or (tick() - fullBagTime >= 5) then
+            if not waitingForBees then waitingForBees = true; fullBagTime = tick() end
+            if tick() - fullBagTime >= 5 then 
                 isConvertingHoney = true; waitingForBees = false
-                teleportTo(Vector3.new(0,0,0)) -- Get Hive Position logic would go here
+                teleportTo(Vector3.new(0,0,0)) -- Generic TP, Hive Logic can be refined
                 game:GetService("ReplicatedStorage").Events.PlayerHiveCommand:FireServer("ToggleHoneyMaking")
             end
-        else
-            if waitingForBees then waitingForBees = false; lastEmptiedTime = tick() end
+        else waitingForBees = false end
+    else
+        if LocalPlayer.PlayerGui.ScreenGui.ActivateButton.TextBox.Text:find("Pollen From Flower Fields") then
+            isConvertingHoney = false; teleportTo(fieldCenter)
         end
+        return
     end
 
-    -- 3. MOVEMENT & FARMING
+    -- Farming
     game:GetService("ReplicatedStorage").Events.ToolCollect:FireServer()
     if not currentTarget or verifyingTokens[currentTarget] or not currentTarget.Parent then
-        local items = getCollectibles()
-        currentTarget = #items > 0 and items[1].part or nil
+        local items = getCollectibles(); currentTarget = #items > 0 and items[1].part or nil
         currentTargetType = #items > 0 and items[1].type or nil
     end
 
@@ -202,40 +293,69 @@ RunService.RenderStepped:Connect(function()
             hum:MoveTo(currentTarget.Position)
             if (hrp.Position - currentTarget.Position).Magnitude < 3 then
                 local t = tick()
-                while currentTarget and currentTarget.Parent and tick() - t < 4 do task.wait() end -- LINK LOCK
+                while currentTarget and currentTarget.Parent and tick() - t < 4 do task.wait() end -- Link Ability Lock
                 crosshairBlacklist[currentTarget] = true; currentTarget = nil
             end
         else
-            local dest = getClampedOvershoot(hrp.Position, currentTarget.Position)
-            hum:MoveTo(dest)
-            if (hrp.Position - dest).Magnitude < 2 then
-                verifyingTokens[currentTarget] = tick(); currentTarget = nil
-            end
+            local dir = (currentTarget.Position - hrp.Position).Unit
+            local dest = currentTarget.Position + (dir * 4)
+            hum:MoveTo(Vector3.new(math.clamp(dest.X, fieldBounds.x1, fieldBounds.x2), hrp.Position.Y, math.clamp(dest.Z, fieldBounds.z1, fieldBounds.z2)))
+            if (hrp.Position - dest).Magnitude < 2 then verifyingTokens[currentTarget] = tick(); currentTarget = nil end
         end
-    else
-        hum:MoveTo(fieldCenter)
+    else hum:MoveTo(fieldCenter) end
+end))
+
+-- [[ THREADS: STATS, UI, BOOSTER ]]
+task.spawn(function()
+    checkBoosters()
+    while _G.Running do
+        task.wait(1)
+        local elapsed = tick() - startTime
+        local honey = LocalPlayer.CoreStats.Honey.Value - initialHoney
+        local pollen = LocalPlayer.CoreStats.Pollen.Value - initialPollen
+        local hps, pps = honey/elapsed, pollen/elapsed
+
+        -- UI Realtime Update
+        UI_Stats.hS.Text = "Honey/s: " .. formatNumber(hps)
+        UI_Stats.hM.Text = "Honey/m: " .. formatNumber(hps*60)
+        UI_Stats.hH.Text = "Honey/h: " .. formatNumber(hps*3600)
+        UI_Stats.pS.Text = "Pollen/s: " .. formatNumber(pps)
+        UI_Stats.pM.Text = "Pollen/m: " .. formatNumber(pps*60)
+        UI_Stats.pH.Text = "Pollen/h: " .. formatNumber(pps*3600)
+        UI_Stats.total.Text = "Total: " .. formatNumber(honey)
+        UI_Stats.time.Text = "Elapsed: " .. string.format("%02d:%02d:%02d", math.floor(elapsed/3600), math.floor((elapsed%3600)/60), math.floor(elapsed%60))
+
+        -- Booster Background Logic
+        if #boosterQueue > 0 and not isConvertingHoney and not activeBooster then
+            activeBooster = true
+            local b = table.remove(boosterQueue, 1)
+            teleportTo(Boosters[b].pos); task.wait(1)
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+            task.wait(0.2); VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+            task.delay(Boosters[b].time, function() table.insert(boosterQueue, b) end)
+            task.wait(2)
+            activeBooster = false; teleportTo(fieldCenter)
+        end
     end
 end)
 
--- [[ STATS & WEBHOOK ]]
+-- [[ WEBHOOK TASK ]]
 task.spawn(function()
-    checkBoosters()
-    while true do
-        task.wait(300)
+    while _G.Running do
+        task.wait(300) -- Every 5 minutes
         local elapsed = tick() - startTime
-        local honey = LocalPlayer.CoreStats.Honey.Value - initialHoney
-        local pol = LocalPlayer.CoreStats.Pollen.Value - initialPollen
-        local hps = honey / elapsed
-        local pps = pol / elapsed
-        
+        local h = LocalPlayer.CoreStats.Honey.Value - initialHoney
+        local p = LocalPlayer.CoreStats.Pollen.Value - initialPollen
+        local hps, pps = h/elapsed, p/elapsed
         local embeds = {{
-            title = "BSS Macro Update", color = 0x00FF00,
+            title = "BSS MACRO STATUS", color = 0x00A2FF,
             fields = {
-                {name = "Honey (S/M/H)", value = string.format("%s | %s | %s", formatNumber(hps), formatNumber(hps*60), formatNumber(hps*3600)), inline = false},
-                {name = "Pollen (S/M/H)", value = string.format("%s | %s | %s", formatNumber(pps), formatNumber(pps*60), formatNumber(pps*3600)), inline = false},
-                {name = "Session Total", value = formatNumber(honey), inline = true},
-                {name = "Time", value = os.date("!%X", elapsed), inline = true}
-            }
+                {name = "Honey (S/M/H)", value = string.format("%s | %s | %s", formatNumber(hps), formatNumber(hps*60), formatNumber(hps*3600))},
+                {name = "Pollen (S/M/H)", value = string.format("%s | %s | %s", formatNumber(pps), formatNumber(pps*60), formatNumber(pps*3600))},
+                {name = "Total Session Honey", value = formatNumber(h), inline = true},
+                {name = "Runtime", value = os.date("!%X", elapsed), inline = true}
+            },
+            timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
         }}
         pcall(function()
             local req = (syn and syn.request) or (http and http.request) or request
@@ -245,10 +365,10 @@ task.spawn(function()
 end)
 
 -- [[ ANTI-IDLE ]]
-LocalPlayer.Idled:Connect(function()
+table.insert(connections, LocalPlayer.Idled:Connect(function()
     VirtualUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
     task.wait(1); VirtualUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
-end)
+end))
 
 teleportTo(fieldCenter)
-print("✅ Master Script Executed. Field Locked. Crosshair Link Lock Active.")
+print("✅ Master BSS Script Loaded. Gingerbread House & Stuck Failsafe Active.")
