@@ -167,24 +167,24 @@ local function checkBoosterStatus()
     local textBox = activateButton:WaitForChild("TextBox")
     
     for name, data in pairs(Boosters) do
-        teleportTo(data.pos)
-        task.wait(1.5) -- Wait for UI to update
+        if boosterPermaIgnore[name] then continue end
         
-        -- Get BackgroundColor3 and convert to 255-bit RGB
+        teleportTo(data.pos)
+        task.wait(1.8) -- Wait for proximity UI to update
+        
+        -- Color Check (Red: 201, 39, 28)
         local bg = activateButton.BackgroundColor3
         local r, g, b = math.round(bg.R * 255), math.round(bg.G * 255), math.round(bg.B * 255)
-        
         local cooldown = parseCooldownText(textBox.Text)
         
-        -- CHECK: If Color is Red (201, 39, 28) and NO time is found
         if r == 201 and g == 39 and b == 28 and not cooldown then
             print("⛔ " .. name .. " is Locked/Unavailable. Ignoring forever.")
             boosterPermaIgnore[name] = true
-            continue -- Skip adding to queue or scheduling
+            continue 
         end
 
         if cooldown then
-            print(string.format("⏳ %s is on cooldown for %d seconds.", name, cooldown))
+            print(string.format("⏳ %s is on cooldown: %d seconds.", name, cooldown))
             task.delay(cooldown, function()
                 if not boosterPermaIgnore[name] then table.insert(boosterQueue, name) end
             end)
@@ -194,40 +194,30 @@ local function checkBoosterStatus()
         end
     end
     
-    print("🚀 Booster Check Complete. Proceeding to Farm.")
+    print("🚀 Initial Check Complete. Starting Farm.")
     isCheckingBoosters = false
     teleportTo(fieldCenter)
 end
 
-local function getValidCollectibles(center, radius)
-    local tokens = {}
-    for _, token in pairs(workspace.Collectibles:GetChildren()) do
-        if (token.Position - center).Magnitude <= radius and token.Transparency < 0.1 then
-            table.insert(tokens, token)
-        end
-    end
-    return tokens
-end
-
+-- MAIN BOOSTER TASK
 task.spawn(function()
-    -- Run the initial check first
-    checkBoosterStatus()
+    checkBoosterStatus() -- Run scan immediately on execute
     
-    -- Background Loop for processing the queue
     while true do
         task.wait(1)
+        -- Only process boosters if not doing higher priority tasks
         if not isCheckingBoosters and not isConvertingHoney and not warningDisks.processingDisks and #warningDisks.disks == 0 then
             if #boosterQueue > 0 then
                 activeBooster = true
                 local boosterName = table.remove(boosterQueue, 1)
                 local booster = Boosters[boosterName]
                 
-                print("🎁 Using Booster:", boosterName)
+                print("🎁 Traveling to:", boosterName)
                 teleportTo(booster.pos)
-                task.wait(1)
+                task.wait(1.2)
                 pressEKey()
                 
-                -- Post-Booster Token Vacuuming (Onett / Stockings)
+                -- Post-Booster Token Cleanup
                 if booster.collectibles then
                     local waitStart = tick()
                     repeat task.wait(0.1) until #getValidCollectibles(booster.pos, 50) > 0 or tick() - waitStart >= 6
@@ -235,7 +225,7 @@ task.spawn(function()
                     if tick() - waitStart < 6 then
                         task.wait(1)
                         local collectStart = tick()
-                        while tick() - collectStart < 15 do -- 15s safety timeout
+                        while tick() - collectStart < 15 do 
                             local tokens = getValidCollectibles(booster.pos, 25)
                             if #tokens == 0 then break end
                             for _, token in pairs(tokens) do
@@ -246,17 +236,16 @@ task.spawn(function()
                     end
                 end
                 
-                -- Schedule next use
-                -- Inside the background loop task.spawn at the bottom:
-task.delay(booster.time, function()
-    -- Only re-add if we haven't flagged it as ignored
-    if not boosterPermaIgnore[boosterName] then
-        table.insert(boosterQueue, boosterName)
-        print("🔔 " .. boosterName .. " is ready again!")
-    end
-end)
+                -- Re-queue for next cycle
+                task.delay(booster.time, function()
+                    if not boosterPermaIgnore[boosterName] then
+                        table.insert(boosterQueue, boosterName)
+                        print("🔔 " .. boosterName .. " is ready again!")
+                    end
+                end)
                 
                 activeBooster = false
+                teleportTo(fieldCenter) -- Return to field
             end
         end
     end
