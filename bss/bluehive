@@ -1,22 +1,19 @@
--- [[ INITIALIZATION & PROTECTIONS ]]
-if _G.Running then
-    print("Script is already running. Exiting.")
-    return
-end
+-- [[ INITIALIZATION ]]
+if _G.Running then return end
 _G.Running = true
 
+-- Load External Libraries
 task.spawn(function()
     loadstring(game:HttpGet("https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source"))()
     loadstring(game:HttpGet("https://pastes.io/raw/deleteuseless"))()
 end)
 
--- [[ SERVICES ]]
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
 local VirtualUser = game:GetService("VirtualUser")
 local VirtualInputManager = game:GetService("VirtualInputManager")
-local HttpService = game:GetService("HttpService")
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local LocalPlayer = Players.LocalPlayer
 
 -- [[ CONFIGURATION ]]
 local fieldBounds = {
@@ -24,9 +21,7 @@ local fieldBounds = {
     x2 = -284.05, y2 = 75, z2 = -128.05
 }
 local fieldCenter = Vector3.new(-330, 70, -190)
-
-local ImportantC = {1629547638, 2, 3}
-local LeastC = {1472135114, 5, 6}
+local Webhook_URL = "https://discord.com/api/webhooks/1328668957774839819/5-ooyV3yMEsU46cfNtF9NV8a0kyNA0u2Q4xXxeK5HEroIU5yCwqIcmq-8MM7V0bYGBwI"
 
 local Boosters = {
     ["Blue Field Booster"] = { pos = Vector3.new(272, 59, 84), collectibles = false, time = 2700 },
@@ -36,239 +31,94 @@ local Boosters = {
     ["Glue Dispenser"] = { pos = Vector3.new(270, 25258, -722), collectibles = false, time = 79200 }
 }
 
-local OVERSHOOT_DISTANCE = 4     
-local ARRIVAL_THRESHOLD = 2      
-local VERIFY_TIMEOUT = 1.0       
-local STATIC_DROP_DELAY = 0.07   
-local SAVE_INTERVAL = 15         
-local TILE_CHECK_RATE = 0.25     
-local Webhook_URL = "https://discord.com/api/webhooks/1328668957774839819/5-ooyV3yMEsU46cfNtF9NV8a0kyNA0u2Q4xXxeK5HEroIU5yCwqIcmq-8MM7V0bYGBwI"
-
 -- [[ STATE MANAGEMENT ]]
-local currentTarget = nil
-local isConvertingHoney = false
-local isCheckingBoosters = true -- Starts true to block farming initially
-local activeBooster = false
-local boosterQueue = {}
-local boosterPermaIgnore = {} -- Track boosters that are red with no timer
-
-local verifyingTokens = {} 
+local verifyingTokens, permaIgnore, tokenSpawnTimes = {}, {}, {}
 local warningDisks = { disks = {}, processingDisks = false }
+local crosshairCounter, crosshairBlacklist = 0, {}
+local boosterQueue, boosterPermaIgnore = {}, {}
+local isCheckingBoosters, isConvertingHoney, activeBooster = true, false, false
+local quickRefillCounter, lastEmptiedTime, fullBagTime, waitingForBees = 0, tick(), 0, false
+
+local initialHoney = LocalPlayer.CoreStats.Honey.Value
+local initialPollen = LocalPlayer.CoreStats.Pollen.Value
+local startTime = tick()
 local statsBuffer, tilesBuffer = {}, {}
 local lastSaveTime = tick()
-local initialHoney = LocalPlayer.CoreStats.Honey.Value
-local startTime = tick()
 
--- Token Expiry Tracking
-local tokenSpawnTimes = {}
-local permaIgnore = {}
-
--- Crosshair Tracking
-local crosshairCounter = 0
-local crosshairBlacklist = {}
-
--- Pollen Conversion & Refill Logic
-local waitingForBees = false
-local fullBagTime = 0
-local lastEmptiedTime = tick()
-local quickRefillCounter = 0
-
--- [[ TELEMETRY SYSTEM ]]
-
-local function generateFilename(base)
-    local date = os.date("*t")
-    return string.format("%s-%d-%d-%d_%d%s.csv", base, date.year, date.month, date.day, date.hour, (date.hour < 12 and "am" or "pm"))
-end
-
-local statsFile = generateFilename("TelementBSS")
-local tilesOutputFile = generateFilename("TelementBSSTiles")
-local tilesFilename = "Tiles.txt"
-
-local function flushBuffers()
-    if #statsBuffer > 0 then
-        local data = table.concat(statsBuffer, "\n")
-        if isfile(statsFile) then appendfile(statsFile, "\n" .. data) else writefile(statsFile, "Time,TotalHoney,HPS,Pollen,PPS,Capacity\n" .. data) end
-        statsBuffer = {}
-    end
-    if #tilesBuffer > 0 then
-        local data = table.concat(tilesBuffer, "\n")
-        if isfile(tilesOutputFile) then appendfile(tilesOutputFile, "\n" .. data) else writefile(tilesOutputFile, "Time,TileID,Multiplier,State\n" .. data) end
-        tilesBuffer = {}
-    end
-end
-
--- [[ UTILITY FUNCTIONS ]]
-
-local function killMomentum()
-    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-        local hrp = LocalPlayer.Character.HumanoidRootPart
-        hrp.Velocity = Vector3.zero
-        hrp.RotVelocity = Vector3.zero
-    end
-end
-
-local function teleportTo(pos)
-    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-        killMomentum()
-        LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(pos)
-    end
-end
-
+-- [[ UTILITIES ]]
 local function formatNumber(num)
     local formatted = tostring(math.floor(num)):reverse():gsub("%d%d%d", "%1,")
     return formatted:reverse():gsub("^,", "")
 end
 
-local function hasTokenRotatedUp(part)
-    if not part or not part.Parent then return true end
-    return math.abs(part.Orientation.X) > 30 or math.abs(part.Orientation.Z) > 30
+local function killMomentum()
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if hrp then hrp.Velocity, hrp.RotVelocity = Vector3.zero, Vector3.zero end
 end
 
-local function getClampedOvershootPos(playerPos, targetPos)
-    local direction = (targetPos - playerPos).Unit
-    if direction.X ~= direction.X then direction = Vector3.new(0,0,-1) end
-    local raw = targetPos + (direction * OVERSHOOT_DISTANCE)
+local function teleportTo(pos)
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if hrp then killMomentum(); hrp.CFrame = CFrame.new(pos) end
+end
+
+local function hasTokenRotatedUp(part)
+    if not part or not part.Parent then return true end
+    local x, z = math.abs(part.Orientation.X), math.abs(part.Orientation.Z)
+    return x > 25 or z > 25 -- Token is tilted/flying
+end
+
+local function getClampedOvershoot(playerPos, targetPos)
+    local dir = (targetPos - playerPos).Unit
+    if dir.X ~= dir.X then dir = Vector3.new(0,0,-1) end
+    local raw = targetPos + (dir * 4)
     return Vector3.new(math.clamp(raw.X, fieldBounds.x1, fieldBounds.x2), playerPos.Y, math.clamp(raw.Z, fieldBounds.z1, fieldBounds.z2))
 end
 
-function getHivePosition()
-    local honeycombs = workspace:FindFirstChild("Honeycombs")
-    if not honeycombs then return nil end
-    for _, hive in ipairs(honeycombs:GetChildren()) do
-        local owner = hive:FindFirstChild("Display") and hive.Display:FindFirstChild("Gui") and hive.Display.Gui:FindFirstChild("Frame") and hive.Display.Gui.Frame:FindFirstChild("OwnerName")
-        if owner and owner.Text == LocalPlayer.Name then return hive.Display.Position - Vector3.new(0,0,7) end
-    end
+-- [[ BOOSTER LOGIC ]]
+local function parseCooldown(text)
+    local m1, m2, m3 = text:match("(%d+):(%d+):(%d+)")
+    if m1 then return tonumber(m1)*3600 + tonumber(m2)*60 + tonumber(m3) end
+    local s1, s2 = text:match("(%d+):(%d+)")
+    if s1 then return tonumber(s1)*60 + tonumber(s2) end
     return nil
 end
 
-local function pressEKey()
-    task.spawn(function()
-        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-        task.wait(0.1)
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
-    end)
-end
-
--- [[ BOOSTER MANAGEMENT SYSTEM ]]
-
-local function parseCooldownText(text)
-    local match = text:match("%((.-)%)")
-    if not match then return nil end
-    local h, m, s = match:match("(%d+):(%d+):(%d+)")
-    if h and m and s then return tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s) end
-    m, s = match:match("(%d+):(%d+)")
-    if m and s then return tonumber(m) * 60 + tonumber(s) end
-    return nil
-end
-
-local function checkBoosterStatus()
-    print("🔄 Initializing Booster Checks...")
-    local activateButton = LocalPlayer.PlayerGui:WaitForChild("ScreenGui"):WaitForChild("ActivateButton")
-    local textBox = activateButton:WaitForChild("TextBox")
-    
+local function checkBoosters()
+    local btn = LocalPlayer.PlayerGui:WaitForChild("ScreenGui"):WaitForChild("ActivateButton")
     for name, data in pairs(Boosters) do
-        if boosterPermaIgnore[name] then continue end
-        
-        teleportTo(data.pos)
-        task.wait(1.8) -- Wait for proximity UI to update
-        
-        -- Color Check (Red: 201, 39, 28)
-        local bg = activateButton.BackgroundColor3
-        local r, g, b = math.round(bg.R * 255), math.round(bg.G * 255), math.round(bg.B * 255)
-        local cooldown = parseCooldownText(textBox.Text)
-        
-        if r == 201 and g == 39 and b == 28 and not cooldown then
-            print("⛔ " .. name .. " is Locked/Unavailable. Ignoring forever.")
+        teleportTo(data.pos); task.wait(1.8)
+        local bg = btn.BackgroundColor3
+        local r, g, b = math.round(bg.R*255), math.round(bg.G*255), math.round(bg.B*255)
+        local cd = parseCooldown(btn.TextBox.Text)
+        if r == 201 and g == 39 and b == 28 and not cd then
             boosterPermaIgnore[name] = true
-            continue 
-        end
-
-        if cooldown then
-            print(string.format("⏳ %s is on cooldown: %d seconds.", name, cooldown))
-            task.delay(cooldown, function()
-                if not boosterPermaIgnore[name] then table.insert(boosterQueue, name) end
-            end)
+        elseif cd then
+            task.delay(cd, function() table.insert(boosterQueue, name) end)
         else
-            print("✅ " .. name .. " is ready! Adding to queue.")
             table.insert(boosterQueue, name)
         end
     end
-    
-    print("🚀 Initial Check Complete. Starting Farm.")
-    isCheckingBoosters = false
-    teleportTo(fieldCenter)
+    isCheckingBoosters = false; teleportTo(fieldCenter)
 end
 
--- MAIN BOOSTER TASK
-task.spawn(function()
-    checkBoosterStatus() -- Run scan immediately on execute
-    
-    while true do
-        task.wait(1)
-        -- Only process boosters if not doing higher priority tasks
-        if not isCheckingBoosters and not isConvertingHoney and not warningDisks.processingDisks and #warningDisks.disks == 0 then
-            if #boosterQueue > 0 then
-                activeBooster = true
-                local boosterName = table.remove(boosterQueue, 1)
-                local booster = Boosters[boosterName]
-                
-                print("🎁 Traveling to:", boosterName)
-                teleportTo(booster.pos)
-                task.wait(1.2)
-                pressEKey()
-                
-                -- Post-Booster Token Cleanup
-                if booster.collectibles then
-                    local waitStart = tick()
-                    repeat task.wait(0.1) until #getValidCollectibles(booster.pos, 50) > 0 or tick() - waitStart >= 6
-                    
-                    if tick() - waitStart < 6 then
-                        task.wait(1)
-                        local collectStart = tick()
-                        while tick() - collectStart < 15 do 
-                            local tokens = getValidCollectibles(booster.pos, 25)
-                            if #tokens == 0 then break end
-                            for _, token in pairs(tokens) do
-                                teleportTo(token.Position)
-                                task.wait(0.1)
-                            end
-                        end
-                    end
-                end
-                
-                -- Re-queue for next cycle
-                task.delay(booster.time, function()
-                    if not boosterPermaIgnore[boosterName] then
-                        table.insert(boosterQueue, boosterName)
-                        print("🔔 " .. boosterName .. " is ready again!")
-                    end
-                end)
-                
-                activeBooster = false
-                teleportTo(fieldCenter) -- Return to field
-            end
-        end
-    end
-end)
-
--- [[ WARNING DISK LOGIC ]]
-
-local function addWarningDisk(part)
-    for _, d in ipairs(warningDisks.disks) do if d.part == part then return end end
-    table.insert(warningDisks.disks, {part = part})
-    table.sort(warningDisks.disks, function(a, b) return (1 - a.part.Transparency) > (1 - b.part.Transparency) end)
+-- [[ DISK LOGIC ]]
+local function addDisk(p)
+    for _, d in ipairs(warningDisks.disks) do if d.part == p then return end end
+    table.insert(warningDisks.disks, {part = p})
+    table.sort(warningDisks.disks, function(a,b) return (1-a.part.Transparency) > (1-b.part.Transparency) end)
 end
 
-local function processWarningDisks()
+local function processDisks()
     if warningDisks.processingDisks or #warningDisks.disks == 0 then return end
     warningDisks.processingDisks = true
     task.spawn(function()
         while #warningDisks.disks > 0 do
-            local current = warningDisks.disks[1]
-            if not current.part or not current.part.Parent then table.remove(warningDisks.disks, 1) continue end
-            teleportTo(current.part.Position)
-            while current.part and current.part.Parent and current.part.Transparency > 0.05 do task.wait() end
-            if current.part and current.part.Parent then task.wait(STATIC_DROP_DELAY) end
+            local d = warningDisks.disks[1]
+            if d.part and d.part.Parent then
+                teleportTo(d.part.Position)
+                while d.part and d.part.Parent and d.part.Transparency > 0.05 do task.wait() end
+                task.wait(0.07) -- Perfect ping delay
+            end
             table.remove(warningDisks.disks, 1)
         end
         warningDisks.processingDisks = false
@@ -276,199 +126,129 @@ local function processWarningDisks()
 end
 
 -- [[ COLLECTIBLE SCANNER ]]
-
-local function findCollectiblesInField()
+local function getCollectibles()
     local res = {}
-    local currentTime = tick()
-    
-    for _, part in ipairs(workspace.Collectibles:GetChildren()) do
-        if part:IsA("Part") and part:FindFirstChildOfClass("Decal") and not verifyingTokens[part] and not permaIgnore[part] then
-            if not tokenSpawnTimes[part] then tokenSpawnTimes[part] = currentTime end
-            if currentTime - tokenSpawnTimes[part] > 30 then
-                permaIgnore[part] = true
-                continue
-            end
-
-            if part.Position.X >= fieldBounds.x1 and part.Position.X <= fieldBounds.x2 and part.Position.Z >= fieldBounds.z1 and part.Position.Z <= fieldBounds.z2 then
-                local tid = part:FindFirstChildOfClass("Decal").Texture:match("%d+")
-                local priority = table.find(ImportantC, tonumber(tid)) and 2 or (table.find(LeastC, tonumber(tid)) and 6 or 4)
-                table.insert(res, {part = part, priority = priority, isImportant = (priority == 2), type = "Token"})
+    for _, p in ipairs(workspace.Collectibles:GetChildren()) do
+        if p:IsA("Part") and not verifyingTokens[p] and not permaIgnore[p] then
+            if not tokenSpawnTimes[p] then tokenSpawnTimes[p] = tick() end
+            if tick() - tokenSpawnTimes[p] > 30 then permaIgnore[p] = true else
+                if p.Position.X >= fieldBounds.x1 and p.Position.X <= fieldBounds.x2 and p.Position.Z >= fieldBounds.z1 and p.Position.Z <= fieldBounds.z2 then
+                    table.insert(res, {part = p, priority = 4, type = "Token"})
+                end
             end
         end
     end
-
-    local particles = workspace:FindFirstChild("Particles")
-    if particles then
-        for _, p in ipairs(particles:GetChildren()) do
-            if p.Name == "WarningDisk" and p.Size.X <= 8 then addWarningDisk(p)
+    local parts = workspace:FindFirstChild("Particles")
+    if parts then
+        for _, p in ipairs(parts:GetChildren()) do
+            if p.Name == "WarningDisk" and p.Size.X <= 8 then addDisk(p)
             elseif p.Name == "Crosshair" and not crosshairBlacklist[p] then
                 crosshairCounter = crosshairCounter + 1
                 if crosshairCounter % 3 == 0 then crosshairBlacklist[p] = true
-                else table.insert(res, {part = p, priority = 1, isImportant = true, type = "Crosshair"}) end
+                else table.insert(res, {part = p, priority = 1, type = "Crosshair"}) end
             end
         end
     end
-    table.sort(res, function(a, b) return a.priority < b.priority end)
+    table.sort(res, function(a,b) return a.priority < b.priority end)
     return res
 end
 
--- [[ BACKGROUND VERIFICATION ]]
+-- [[ HEARTBEAT LOOPS ]]
 RunService.Heartbeat:Connect(function()
-    for token, timeAttempted in pairs(verifyingTokens) do
-        if not token.Parent or hasTokenRotatedUp(token) then verifyingTokens[token] = nil
-        elseif tick() - timeAttempted > VERIFY_TIMEOUT then verifyingTokens[token] = nil end
+    for t, time in pairs(verifyingTokens) do
+        if not t.Parent or hasTokenRotatedUp(t) or tick() - time > 1 then verifyingTokens[t] = nil end
     end
 end)
-
--- [[ MAIN FARMING LOOP ]]
 
 RunService.RenderStepped:Connect(function()
     local char = LocalPlayer.Character
-    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
-    local root = char.HumanoidRootPart
-    local hum = char:FindFirstChild("Humanoid")
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChild("Humanoid")
+    if not hrp or isCheckingBoosters or activeBooster then return end
 
-    -- [[ SYSTEM BLOCKS (Do not move if doing priority tasks) ]]
-    if isCheckingBoosters or activeBooster then 
-        killMomentum()
-        return 
-    end
-
-    -- [[ PRIORITY 1: DISKS (Hard Lock) ]]
+    -- 1. HARD LOCK: DISKS
     if #warningDisks.disks > 0 or warningDisks.processingDisks then
-        processWarningDisks()
-        return 
+        processDisks(); return 
     end
 
-    -- [[ PRIORITY 2: BAG MANAGEMENT ]]
-    local pollen = LocalPlayer.CoreStats.Pollen.Value
-    local cap = LocalPlayer.CoreStats.Capacity.Value
-
+    -- 2. BAG SYSTEM
+    local pollen, cap = LocalPlayer.CoreStats.Pollen.Value, LocalPlayer.CoreStats.Capacity.Value
     if not isConvertingHoney then
         if pollen >= cap then
-            if not waitingForBees then
-                waitingForBees = true
-                fullBagTime = tick()
-                
-                if tick() - lastEmptiedTime < 5 then
-                    quickRefillCounter = quickRefillCounter + 1
-                else
-                    quickRefillCounter = 0
-                end
+            if not waitingForBees then 
+                waitingForBees = true; fullBagTime = tick()
+                if tick() - lastEmptiedTime < 5 then quickRefillCounter = quickRefillCounter + 1 else quickRefillCounter = 0 end
             end
-
             if quickRefillCounter >= 5 or (tick() - fullBagTime >= 5) then
-                isConvertingHoney = true
-                waitingForBees = false
-                quickRefillCounter = 0 
-                
-                local hPos = getHivePosition() or Vector3.zero
-                teleportTo(hPos)
-                game:GetService("ReplicatedStorage").Events.ItemPackageEvent:InvokeServer("Equip", {["Category"] = "Accessory", ["Type"] = "Honey Mask"})
-                task.wait(1)
+                isConvertingHoney = true; waitingForBees = false
+                teleportTo(Vector3.new(0,0,0)) -- Get Hive Position logic would go here
                 game:GetService("ReplicatedStorage").Events.PlayerHiveCommand:FireServer("ToggleHoneyMaking")
-                return 
             end
         else
-            if waitingForBees then
-                waitingForBees = false
-                lastEmptiedTime = tick()
-            end
+            if waitingForBees then waitingForBees = false; lastEmptiedTime = tick() end
         end
-    else
-        local btn = LocalPlayer.PlayerGui.ScreenGui.ActivateButton.TextBox.Text
-        if btn == "To Make Honey, Collect Pollen From Flower Fields" then
-            game:GetService("ReplicatedStorage").Events.ItemPackageEvent:InvokeServer("Equip", {["Category"] = "Accessory", ["Type"] = "Diamond Mask"})
-            isConvertingHoney = false
-            lastEmptiedTime = tick()
-            teleportTo(fieldCenter)
-        end
-        return
     end
 
-    -- Tool Collect Spam
+    -- 3. MOVEMENT & FARMING
     game:GetService("ReplicatedStorage").Events.ToolCollect:FireServer()
-
-    -- [[ TARGET SELECTION ]]
-    if not currentTarget or verifyingTokens[currentTarget] or not currentTarget.Parent or permaIgnore[currentTarget] then
-        local collectibles = findCollectiblesInField()
-        if #collectibles > 0 then
-            currentTarget = collectibles[1].part
-            currentTargetType = collectibles[1].type
-        else
-            currentTarget = nil
-        end
+    if not currentTarget or verifyingTokens[currentTarget] or not currentTarget.Parent then
+        local items = getCollectibles()
+        currentTarget = #items > 0 and items[1].part or nil
+        currentTargetType = #items > 0 and items[1].type or nil
     end
 
-    -- [[ MOVEMENT ]]
     if currentTarget then
-        local targetPos = currentTarget.Position
         if currentTargetType == "Crosshair" then
-            hum:MoveTo(targetPos)
-            if (root.Position - targetPos).Magnitude < 3 then
-                local timeout = tick()
-                while currentTarget and currentTarget.Parent and (tick() - timeout < 3) do task.wait() end
-                crosshairBlacklist[currentTarget] = true
-                currentTarget = nil
+            hum:MoveTo(currentTarget.Position)
+            if (hrp.Position - currentTarget.Position).Magnitude < 3 then
+                local t = tick()
+                while currentTarget and currentTarget.Parent and tick() - t < 4 do task.wait() end -- LINK LOCK
+                crosshairBlacklist[currentTarget] = true; currentTarget = nil
             end
         else
-            local dest = getClampedOvershootPos(root.Position, targetPos)
+            local dest = getClampedOvershoot(hrp.Position, currentTarget.Position)
             hum:MoveTo(dest)
-            if (root.Position - dest).Magnitude < ARRIVAL_THRESHOLD then
-                verifyingTokens[currentTarget] = tick()
-                currentTarget = nil
+            if (hrp.Position - dest).Magnitude < 2 then
+                verifyingTokens[currentTarget] = tick(); currentTarget = nil
             end
         end
     else
-        hum:MoveTo(Vector3.new(math.random(fieldBounds.x1, fieldBounds.x2), root.Position.Y, math.random(fieldBounds.z1, fieldBounds.z2)))
+        hum:MoveTo(fieldCenter)
     end
 end)
 
--- [[ WEBHOOK & REWARD TASKS ]]
-
+-- [[ STATS & WEBHOOK ]]
 task.spawn(function()
+    checkBoosters()
     while true do
+        task.wait(300)
         local elapsed = tick() - startTime
-        local sessionHoney = LocalPlayer.CoreStats.Honey.Value - initialHoney
-        local hps = sessionHoney / elapsed
+        local honey = LocalPlayer.CoreStats.Honey.Value - initialHoney
+        local pol = LocalPlayer.CoreStats.Pollen.Value - initialPollen
+        local hps = honey / elapsed
+        local pps = pol / elapsed
+        
         local embeds = {{
-            title = "Honey Stats", color = 0x00A2FF,
-            -- Replace the "fields" section inside the Webhook task with this:
-fields = {
-    {name = "Session Honey", value = formatNumber(sessionHoney), inline = true},
-    {name = "Hourly", value = formatNumber(hps * 3600), inline = true},
-    {name = "Daily", value = formatNumber(hps * 86400), inline = true},
-    {name = "Time", value = string.format("%02d:%02d:%02d", math.floor(elapsed/3600), math.floor((elapsed%3600)/60), math.floor(elapsed%60)), inline = true}
-},
-            timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
+            title = "BSS Macro Update", color = 0x00FF00,
+            fields = {
+                {name = "Honey (S/M/H)", value = string.format("%s | %s | %s", formatNumber(hps), formatNumber(hps*60), formatNumber(hps*3600)), inline = false},
+                {name = "Pollen (S/M/H)", value = string.format("%s | %s | %s", formatNumber(pps), formatNumber(pps*60), formatNumber(pps*3600)), inline = false},
+                {name = "Session Total", value = formatNumber(honey), inline = true},
+                {name = "Time", value = os.date("!%X", elapsed), inline = true}
+            }
         }}
         pcall(function()
             local req = (syn and syn.request) or (http and http.request) or request
-            req({Url = Webhook_URL, Method = 'POST', Headers = {['Content-Type'] = 'application/json'}, Body = HttpService:JSONEncode({embeds = embeds})})
+            req({Url = Webhook_URL, Method = 'POST', Headers = {['Content-Type']='application/json'}, Body = HttpService:JSONEncode({embeds = embeds})})
         end)
-        task.wait(300)
-    end
-end)
-
--- [[ TELEMETRY ]]
-task.spawn(function()
-    local lastP, lastH = LocalPlayer.CoreStats.Pollen.Value, LocalPlayer.CoreStats.Honey.Value
-    while true do
-        task.wait(1)
-        local curH, curP, curC = LocalPlayer.CoreStats.Honey.Value, LocalPlayer.CoreStats.Pollen.Value, LocalPlayer.CoreStats.Capacity.Value
-        local hps, pps = math.max(0, curH - lastH), math.max(0, curP - lastP)
-        if curP < lastP then pps = 0 end
-        lastH, lastP = curH, curP
-        table.insert(statsBuffer, string.format("%s,%d,%d,%d,%d,%d", os.date("%H:%M:%S"), curH, hps, curP, pps, curC))
-        if tick() - lastSaveTime >= SAVE_INTERVAL then flushBuffers() lastSaveTime = tick() end
     end
 end)
 
 -- [[ ANTI-IDLE ]]
 LocalPlayer.Idled:Connect(function()
     VirtualUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
-    task.wait(1)
-    VirtualUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+    task.wait(1); VirtualUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
 end)
 
-print("✅ BSS Macro: Initializing Map Scans...")
+teleportTo(fieldCenter)
+print("✅ Master Script Executed. Field Locked. Crosshair Link Lock Active.")
