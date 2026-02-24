@@ -50,6 +50,7 @@ local isConvertingHoney = false
 local isCheckingBoosters = true -- Starts true to block farming initially
 local activeBooster = false
 local boosterQueue = {}
+local boosterPermaIgnore = {} -- Track boosters that are red with no timer
 
 local verifyingTokens = {} 
 local warningDisks = { disks = {}, processingDisks = false }
@@ -162,17 +163,30 @@ end
 
 local function checkBoosterStatus()
     print("🔄 Initializing Booster Checks...")
-    local activateButton = LocalPlayer.PlayerGui:WaitForChild("ScreenGui"):WaitForChild("ActivateButton"):WaitForChild("TextBox")
+    local activateButton = LocalPlayer.PlayerGui:WaitForChild("ScreenGui"):WaitForChild("ActivateButton")
+    local textBox = activateButton:WaitForChild("TextBox")
     
     for name, data in pairs(Boosters) do
         teleportTo(data.pos)
-        task.wait(1.5) -- Wait for UI to update based on proximity
+        task.wait(1.5) -- Wait for UI to update
         
-        local cooldown = parseCooldownText(activateButton.Text)
+        -- Get BackgroundColor3 and convert to 255-bit RGB
+        local bg = activateButton.BackgroundColor3
+        local r, g, b = math.round(bg.R * 255), math.round(bg.G * 255), math.round(bg.B * 255)
+        
+        local cooldown = parseCooldownText(textBox.Text)
+        
+        -- CHECK: If Color is Red (201, 39, 28) and NO time is found
+        if r == 201 and g == 39 and b == 28 and not cooldown then
+            print("⛔ " .. name .. " is Locked/Unavailable. Ignoring forever.")
+            boosterPermaIgnore[name] = true
+            continue -- Skip adding to queue or scheduling
+        end
+
         if cooldown then
             print(string.format("⏳ %s is on cooldown for %d seconds.", name, cooldown))
             task.delay(cooldown, function()
-                table.insert(boosterQueue, name)
+                if not boosterPermaIgnore[name] then table.insert(boosterQueue, name) end
             end)
         else
             print("✅ " .. name .. " is ready! Adding to queue.")
@@ -233,10 +247,14 @@ task.spawn(function()
                 end
                 
                 -- Schedule next use
-                task.delay(booster.time, function()
-                    table.insert(boosterQueue, boosterName)
-                    print("🔔 " .. boosterName .. " is ready again!")
-                end)
+                -- Inside the background loop task.spawn at the bottom:
+task.delay(booster.time, function()
+    -- Only re-add if we haven't flagged it as ignored
+    if not boosterPermaIgnore[boosterName] then
+        table.insert(boosterQueue, boosterName)
+        print("🔔 " .. boosterName .. " is ready again!")
+    end
+end)
                 
                 activeBooster = false
             end
