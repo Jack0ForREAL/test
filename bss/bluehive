@@ -12,7 +12,44 @@ local lastHoneyEPress = 0
 -- External Libs
 task.spawn(function()
     loadstring(game:HttpGet("https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source"))()
-    loadstring(game:HttpGet("https://pastes.io/raw/deleteuseless"))()
+    -- delete useless stuff cant edit paste loadstring(game:HttpGet("https://pastes.io/raw/deleteuseless"))()
+    -- Wait for the game to fully load
+if game:IsLoaded() then
+    -- Destroy specific objects once
+    local objectsToDestroy = {
+		"FlowerZones", "Flowers", "Balloons.FieldBalloons", "Amulets", "Badge Guild",
+        "BearShop1", "BoostBalls", "ClassicMinigame", "Decorations",
+        "Goo", "Paths"
+    }
+
+    for _, objectName in ipairs(objectsToDestroy) do
+        local object = game.Workspace:FindFirstChild(objectName, true)
+        if object then
+            object:Destroy()
+        end
+    end
+
+    -- Destroy all parts that are DIRECTLY inside Workspace
+    for _, instance in ipairs(game.Workspace:GetChildren()) do
+        if instance:IsA("Part") then
+            instance:Destroy()
+        end
+    end
+
+    -- Continuously delete balloons inside FieldBalloons every second
+    task.spawn(function()
+        while true do
+            local fieldBalloons = game.Workspace:FindFirstChild("Balloons")
+            if fieldBalloons then
+                local balloons = fieldBalloons:FindFirstChild("FieldBalloons")
+                if balloons then
+                    balloons:Destroy() -- Fixed capitalization
+                end
+            end
+            task.wait(0.1) -- Wait 1 second before running again
+        end
+    end)
+end
 end)
 
 local Players = game:GetService("Players")
