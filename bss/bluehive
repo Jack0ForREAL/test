@@ -268,7 +268,7 @@ end)
 
 task.spawn(function()
     while _G.Running do task.wait(300); local elapsed = tick() - startTime; local h = LocalPlayer.CoreStats.Honey.Value - initialHoney; local hps, pps = h/elapsed, totalPollenCollected/elapsed
-        local embeds = {{title = "BSS MASTER UPDATE", color = 0x00A2FF, fields = {{name = "Honey (S/M/H)", value = string.format("%s | %s | %s", formatNumber(hps), formatNumber(hps*60), formatNumber(hps*3600))}, {name = "Pollen (S/M/H)", value = string.format("%s | %s | %s", formatNumber(pps), formatNumber(pps*60), formatNumber(pps*3600))}, {name = "Total Honey", value = formatNumber(h), inline = true}, {name = "Runtime", value = os.date("!%X", elapsed), inline = true}}, timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")}}
+        local embeds = {{title = "Current Progress", color = 0x00A2FF, fields = {{name = "Honey (S/M/H)", value = string.format("%s | %s | %s", formatNumber(hps), formatNumber(hps*60), formatNumber(hps*3600))}, {name = "Pollen (S/M/H)", value = string.format("%s | %s | %s", formatNumber(pps), formatNumber(pps*60), formatNumber(pps*3600))}, {name = "Total Honey", value = formatNumber(h), inline = true}, {name = "Runtime", value = os.date("!%X", elapsed), inline = true}}, timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")}}
         pcall(function() local req = (syn and syn.request) or (http and http.request) or request; req({Url = Webhook_URL, Method = 'POST', Headers = {['Content-Type']='application/json'}, Body = HttpService:JSONEncode({embeds = embeds})}) end)
     end
 end)
