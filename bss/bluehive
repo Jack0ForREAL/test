@@ -1,55 +1,16 @@
--- [[ INITIALIZATION & PROTECTIONS ]]
+-- [[ INITIALIZATION ]]
 if _G.Running then return end
 _G.Running = true
 
 local connections = {} 
 local firstAttemptTimes, permaIgnore, verifyingTokens = {}, {}, {}
-local totalPollenCollected = 0
-local lastPollenRaw = game.Players.LocalPlayer.CoreStats.Pollen.Value
+local totalPollenCollected, lastPollenRaw = 0, game.Players.LocalPlayer.CoreStats.Pollen.Value
 local startTime, initialHoney = tick(), game.Players.LocalPlayer.CoreStats.Honey.Value
-local lastHoneyEPress = 0 
 
 -- External Libs
 task.spawn(function()
     loadstring(game:HttpGet("https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source"))()
-    -- delete useless stuff cant edit paste loadstring(game:HttpGet("https://pastes.io/raw/deleteuseless"))()
-    -- Wait for the game to fully load
-if game:IsLoaded() then
-    -- Destroy specific objects once
-    local objectsToDestroy = {
-		"FlowerZones", "Flowers", "Balloons.FieldBalloons", "Amulets", "Badge Guild",
-        "BearShop1", "BoostBalls", "ClassicMinigame", "Decorations",
-        "Goo", "Paths"
-    }
-
-    for _, objectName in ipairs(objectsToDestroy) do
-        local object = game.Workspace:FindFirstChild(objectName, true)
-        if object then
-            object:Destroy()
-        end
-    end
-
-    -- Destroy all parts that are DIRECTLY inside Workspace
-    for _, instance in ipairs(game.Workspace:GetChildren()) do
-        if instance:IsA("Part") then
-            instance:Destroy()
-        end
-    end
-
-    -- Continuously delete balloons inside FieldBalloons every second
-    task.spawn(function()
-        while true do
-            local fieldBalloons = game.Workspace:FindFirstChild("Balloons")
-            if fieldBalloons then
-                local balloons = fieldBalloons:FindFirstChild("FieldBalloons")
-                if balloons then
-                    balloons:Destroy() -- Fixed capitalization
-                end
-            end
-            task.wait(0.1) -- Wait 1 second before running again
-        end
-    end)
-end
+    loadstring(game:HttpGet("https://pastes.io/raw/deleteuseless"))()
 end)
 
 local Players = game:GetService("Players")
@@ -64,11 +25,17 @@ local fieldBounds = {x1 = -375.75, y1 = 65, z1 = -251.95, x2 = -284.05, y2 = 75,
 local fieldCenter = Vector3.new(-330, 70, -190)
 local Webhook_URL = "https://discord.com/api/webhooks/1328668957774839819/5-ooyV3yMEsU46cfNtF9NV8a0kyNA0u2Q4xXxeK5HEroIU5yCwqIcmq-8MM7V0bYGBwI"
 
-local Boosters = {["Blue Field Booster"] = { pos = Vector3.new(272, 59, 84), collectibles = false, time = 2700 },
-    ["Wealth Clock"] = { pos = Vector3.new(330, 50, 191), collectibles = false, time = 3600 },["Stockings"] = { pos = Vector3.new(232, 38, 232), collectibles = true, time = 3600 },
+local Boosters = {
+    ["Blue Field Booster"] = { pos = Vector3.new(272, 59, 84), collectibles = false, time = 2700 },
+    ["Wealth Clock"] = { pos = Vector3.new(330, 50, 191), collectibles = false, time = 3600 },
+    ["Stockings"] = { pos = Vector3.new(232, 38, 232), collectibles = true, time = 3600 },
     ["Onett"] = { pos = Vector3.new(34, 236, -512), collectibles = true, time = 28800 },
     ["Glue Dispenser"] = { pos = Vector3.new(270, 25258, -722), collectibles = false, time = 79200 },
-    ["Gingerbread House"] = { pos = Vector3.new(-201, 6, 96), collectibles = false, time = 7200 }
+    ["Gingerbread House"] = { pos = Vector3.new(-201, 6, 96), collectibles = false, time = 7200 },
+    ["Memory Match"] = { pos = Vector3.new(137, 69, -95), collectibles = false, time = 7200, isMM = true },
+    ["Mega Memory Match"] = { pos = Vector3.new(-428, 70, -53), collectibles = false, time = 14400, isMM = true },
+    ["Night Memory Match"] = { pos = Vector3.new(-17, 312, -270), collectibles = false, time = 28800, isMM = true },
+    ["Extreme Memory Match"] = { pos = Vector3.new(-403, 111, 545), collectibles = false, time = 28800, isMM = true }
 }
 
 -- [[ STATE MANAGEMENT ]]
@@ -78,20 +45,24 @@ local boosterQueue, boosterPermaIgnore = {}, {}
 local isCheckingBoosters, isConvertingHoney, activeBooster = true, false, false
 local quickRefillCounter, lastEmptiedTime, fullBagTime, waitingForBees = 0, tick(), 0, false
 local lastTimeInField, lastWanderPos, lastWanderTime = tick(), nil, 0
+local lastHoneyEPress = 0
+
+-- Memory Match State
+local isSolvingMemoryMatch = false
+local ActiveMemoryMatchName = nil
+local lastMMPress = 0
 
 -- [[ CSV TELEMETRY SETUP ]]
 local statsBuffer, tilesBuffer = {}, {}
 local lastSaveTime = tick()
 local SAVE_INTERVAL = 15
+local tilesFilename = "Tiles.txt"
 
 local function generateFilename(base)
     local date = os.date("*t")
     return string.format("%s-%d-%d-%d_%d%s.csv", base, date.year, date.month, date.day, date.hour, (date.hour < 12 and "am" or "pm"))
 end
-
-local statsFile = generateFilename("TelementBSS")
-local tilesOutputFile = generateFilename("TelementBSSTiles")
-local tilesFilename = "Tiles.txt"
+local statsFile, tilesOutputFile = generateFilename("TelementBSS"), generateFilename("TelementBSSTiles")
 
 local function flushBuffers()
     if #statsBuffer > 0 then
@@ -142,7 +113,7 @@ local function createUI()
     local main = Instance.new("Frame", sg); main.Size = UDim2.new(0, 250, 0, 320); main.Position = UDim2.new(0.05, 0, 0.3, 0); main.BackgroundColor3 = Color3.fromRGB(15,15,15); main.BorderSizePixel = 0; main.Active = true; main.Draggable = true
     local uiScale = Instance.new("UIScale", main)
     local top = Instance.new("Frame", main); top.Size = UDim2.new(1,0,0,30); top.BackgroundColor3 = Color3.fromRGB(30,30,30); top.BorderSizePixel = 0
-    local title = Instance.new("TextLabel", top); title.Size = UDim2.new(0.7,0,1,0); title.Text = "  BSS MASTER V8"; title.TextColor3 = Color3.new(1,1,1); title.BackgroundTransparency = 1; title.TextXAlignment = Enum.TextXAlignment.Left; title.Font = Enum.Font.Code
+    local title = Instance.new("TextLabel", top); title.Size = UDim2.new(0.7,0,1,0); title.Text = "  BSS GOD MASTER"; title.TextColor3 = Color3.new(1,1,1); title.BackgroundTransparency = 1; title.TextXAlignment = Enum.TextXAlignment.Left; title.Font = Enum.Font.Code
     local dBtn = Instance.new("TextButton", top); dBtn.Size = UDim2.new(0.25,0,0.8,0); dBtn.Position = UDim2.new(0.72,0,0.1,0); dBtn.BackgroundColor3 = Color3.fromRGB(180,40,40); dBtn.Text = "STOP"; dBtn.TextColor3 = Color3.new(1,1,1)
     local cont = Instance.new("Frame", main); cont.Size = UDim2.new(0.9,0,0.7,0); cont.Position = UDim2.new(0.05,0,0.12,0); cont.BackgroundTransparency = 1
     Instance.new("UIListLayout", cont).Padding = UDim.new(0,5)
@@ -150,7 +121,7 @@ local function createUI()
         local l = Instance.new("TextLabel", cont); l.Size = UDim2.new(1,0,0,18); l.Text = txt; l.TextColor3 = clr or Color3.new(1,1,1); l.BackgroundTransparency = 1; l.TextXAlignment = Enum.TextXAlignment.Left; l.Font = Enum.Font.Code; l.TextScaled = true; return l
     end
     local stats = {hS = createL("H/s: 0"), hM = createL("H/m: 0"), hH = createL("H/h: 0"), pS = createL("P/s: 0", Color3.fromRGB(0,170,255)), pM = createL("P/m: 0", Color3.fromRGB(0,170,255)), pH = createL("P/h: 0", Color3.fromRGB(0,170,255)), total = createL("Total: 0", Color3.new(1,0.8,0)), time = createL("Time: 00:00:00")}
-    local scBox = Instance.new("TextBox", main); scBox.Size = UDim2.new(0.9,0,0,22); scBox.Position = UDim2.new(0.05,0,0.9,0); scBox.BackgroundColor3 = Color3.fromRGB(30,30,30); scBox.Text = "Scale: 1.0"; scBox.TextColor3 = Color3.new(1,1,1)
+    local scBox = Instance.new("TextBox", main); scBox.Size = UDim2.new(0.9,0,0,22); scBox.Position = UDim2.new(0.05,0,0.9,0); scBox.BackgroundColor3 = Color3.fromRGB(30,30,30); scBox.Text = "Scale: 1.0"; scBox.TextColor3 = Color3.new(1,1,1); scBox.Font = Enum.Font.Code
     scBox.FocusLost:Connect(function() local v = tonumber(scBox.Text:match("[%d%.]+")); if v then uiScale.Scale = math.clamp(v, 0.4, 2.5) end end)
     dBtn.MouseButton1Click:Connect(function() _G.Running = false; for _, c in pairs(connections) do c:Disconnect() end; sg:Destroy(); print("Macro Stopped.") end)
     return stats, sg
@@ -164,19 +135,219 @@ table.insert(connections, RunService.Heartbeat:Connect(function()
     lastPollenRaw = cur
 end))
 
--- [[ MEMORY LEAK CLEANUP (Restored) ]]
+-- [[ MEMORY LEAK CLEANUP ]]
 task.spawn(function()
     while _G.Running do
         task.wait(30)
-        local function purge(tbl)
-            for k, _ in pairs(tbl) do
-                if typeof(k) == "Instance" and not k.Parent then tbl[k] = nil end
+        local function purge(tbl) for k, _ in pairs(tbl) do if typeof(k) == "Instance" and not k.Parent then tbl[k] = nil end end end
+        purge(permaIgnore); purge(firstAttemptTimes); purge(verifyingTokens); purge(crosshairBlacklist)
+    end
+end)
+
+-- [[ BACKGROUND INVISIBLE MEMORY MATCH SOLVER ]]
+task.spawn(function()
+    local KnownCards, SolvedSlots, CurrentBoard = {}, {}, nil
+    local GlobalOrderCounter = 0
+    local function getOrderCounter() GlobalOrderCounter = GlobalOrderCounter + 1; return GlobalOrderCounter end
+    local DefaultBackID = "http://www.roblox.com/asset/?id=3690982763"
+
+    local MMLogic = {
+        ["Memory Match"] = {
+            Ignore = {["2028574353"]=true, ["1471882621"]=true,["2863122826"]=true,["8277901755"]=true },
+            ListA = {["1674871631_x5"]=true, ["2529092020"]=true,["2863468407"]=true, ["2584584968"]=true, ["2545746569"]=true },
+            ListB = {["2504978518"]=true }
+        },
+        ["Mega Memory Match"] = {
+            Ignore = {["2028574353"]=true,["1471882621"]=true, ["2863122826"]=true,["8277901755"]=true, ["3012679515"]=true, ["3030407727"]=true },
+            ListA = {["1674871631_x3"]=true,["2863468407_x3"]=true, ["2545746569"]=true, ["2584584968"]=true,["2542899798"]=true, ["15482935937"]=true },
+            ListB = { ["2504978518"]=true,["2319943273"]=true,["1674871631_x10"]=true }
+        },
+        ["Night Memory Match"] = {
+            Ignore = {["2028574353"]=true,["8277901755"]=true, ["2863122826"]=true },
+            ListA = { ["2504978518"]=true,["2314214749"]=true, ["2319943273"]=true },
+            ListB = { ["2676671613"]=true,["2028603146"]=true }
+        },
+        ["Extreme Memory Match"] = {
+            Ignore = { ["2028574353"]=true,["1471882621"]=true, ["1838129169"]=true, ["8277901755"]=true },
+            ListA = {["2319943273"]=true,["2542899798"]=true, ["2542899798_x5"]=true,["3835877932"]=true },
+            ListB = {["1471850677"]=true, ["1471849394"]=true, ["15529301204"]=true,["2028603146"]=true }
+        }
+    }
+
+    local function extractCount(text)
+        if not text then return "" end
+        local m = string.match(text:lower(), "x%d+")
+        return m or ""
+    end
+
+    local function checkCategory(matchType, id, countText)
+        local logic = MMLogic[matchType] or MMLogic["Memory Match"]
+        local sig = id
+        if countText and countText ~= "" then sig = id .. "_" .. countText end
+        if logic.Ignore[sig] or logic.Ignore[id] then return "Ignore" end
+        if logic.ListB[sig] or logic.ListB[id] then return "ListB" end
+        if logic.ListA[sig] or logic.ListA[id] then return "ListA" end
+        return "Common"
+    end
+
+    local function clickSlot(slot)
+        for _, desc in pairs(slot:GetDescendants()) do
+            if (desc:IsA("ImageButton") or desc:IsA("TextButton")) and getconnections then
+                for _, conn in pairs(getconnections(desc.MouseButton1Click)) do conn:Fire() end
+                for _, conn in pairs(getconnections(desc.Activated)) do conn:Fire() end
             end
         end
-        purge(permaIgnore)
-        purge(firstAttemptTimes)
-        purge(verifyingTokens)
-        purge(crosshairBlacklist)
+    end
+
+    local function clickAndRead(slot)
+        local targetImg = nil
+        for _, desc in pairs(slot:GetDescendants()) do
+            if desc.Name == "ObjImage" and desc:IsA("ImageLabel") and desc.Image == DefaultBackID then targetImg = desc; break end
+        end
+        clickSlot(slot)
+        if targetImg then
+            local waited = 0
+            while targetImg.Image == DefaultBackID and waited < 3 do task.wait(0.1); waited = waited + 0.1 end
+            if targetImg.Image ~= DefaultBackID then 
+                local txtLbl = targetImg:FindFirstChild("TextCount")
+                return string.match(targetImg.Image, "%d+"), (txtLbl and extractCount(txtLbl.Text) or "")
+            end
+        else
+            task.wait(0.5)
+            for _, desc in pairs(slot:GetDescendants()) do
+                if desc.Name == "ObjImage" and desc:IsA("ImageLabel") and string.match(desc.Image, "rbxassetid://") then 
+                    local txtLbl = desc:FindFirstChild("TextCount")
+                    return string.match(desc.Image, "%d+"), (txtLbl and extractCount(txtLbl.Text) or "")
+                end
+            end
+        end
+        return nil, ""
+    end
+
+    local function getActiveBoard()
+        local sg = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui")
+        local ml = sg and sg:FindFirstChild("MinigameLayer")
+        if not ml then return nil end
+        for _, child in pairs(ml:GetChildren()) do
+            if child.Name == "MemoryMatchFrame" then
+                local lbl = child:FindFirstChild("ChancesFrame") and child.ChancesFrame:FindFirstChild("CountLabel")
+                if lbl and (tonumber(string.match(lbl.ContentText, "%d+")) or 0) >= 1 then return child end
+            end
+        end
+        return nil
+    end
+
+    local function determineNextAction(matchType, availableSlots)
+        local listBMatches, listAMatches, commonMatches, seenListB, seenListA = {}, {}, {}, {}, {}
+        local idToSlot = {}
+        
+        for slot, data in pairs(KnownCards) do
+            if not SolvedSlots[slot] then
+                if idToSlot[data.sig] then
+                    local pair = {c1 = idToSlot[data.sig], c2 = slot, order = KnownCards[idToSlot[data.sig]].orderSeen}
+                    if data.cat == "ListB" then table.insert(listBMatches, pair)
+                    elseif data.cat == "ListA" then table.insert(listAMatches, pair)
+                    elseif data.cat == "Common" then table.insert(commonMatches, pair) end
+                else
+                    idToSlot[data.sig] = slot
+                    if data.cat == "ListB" then table.insert(seenListB, {s = slot, order = data.orderSeen})
+                    elseif data.cat == "ListA" then table.insert(seenListA, {s = slot, order = data.orderSeen}) end
+                end
+            end
+        end
+        
+        table.sort(listBMatches, function(a,b) return a.order < b.order end)
+        table.sort(listAMatches, function(a,b) return a.order < b.order end)
+        table.sort(commonMatches, function(a,b) return a.order < b.order end)
+        table.sort(seenListB, function(a,b) return a.order < b.order end)
+        table.sort(seenListA, function(a,b) return a.order < b.order end)
+        
+        if #listBMatches > 0 then return "Match", listBMatches[1].c1, listBMatches[1].c2 end
+        if #listAMatches > 0 then return "Match", listAMatches[1].c1, listAMatches[1].c2 end
+        
+        local unk = {}
+        for _, s in ipairs(availableSlots) do if not KnownCards[s] then table.insert(unk, s) end end
+        
+        if #unk > 0 then
+            if #seenListB > 0 then return "Gamble", seenListB[1].s, unk[math.random(1, #unk)] end
+            if #seenListA > 0 then return "Gamble", seenListA[1].s, unk[math.random(1, #unk)] end
+        end
+        
+        if #commonMatches > 0 then return "Match", commonMatches[1].c1, commonMatches[1].c2 end
+        
+        if #unk >= 2 then
+            local u1 = unk[math.random(1, #unk)]
+            local u2; repeat u2 = unk[math.random(1, #unk)] until u2 ~= u1
+            return "Gamble2", u1, u2
+        elseif #unk == 1 then
+            local u1 = unk[1]; local pick
+            for s, d in pairs(KnownCards) do if not SolvedSlots[s] and d.cat ~= "Ignore" then pick = s; break end end
+            if not pick then pick = availableSlots[1] end
+            if pick == u1 then pick = availableSlots[2] end
+            return "Gamble2", u1, pick
+        end
+        return "Random", availableSlots[1], availableSlots[2]
+    end
+
+    local function doTurn(matchType, action, slot1, slot2)
+        if action == "Match" or action == "Random" then
+            clickSlot(slot1); task.wait(0.2); clickSlot(slot2)
+            SolvedSlots[slot1] = true; SolvedSlots[slot2] = true
+            task.wait(1.2)
+        elseif action == "Gamble" then
+            local id2, count2 = clickAndRead(slot2)
+            if id2 then
+                local sig2 = id2; if count2 ~= "" then sig2 = id2 .. "_" .. count2 end
+                KnownCards[slot2] = {id = id2, count = count2, sig = sig2, cat = checkCategory(matchType, id2, count2), orderSeen = getOrderCounter()}
+                local pairSlot
+                for s, d in pairs(KnownCards) do if s ~= slot2 and not SolvedSlots[s] and d.sig == sig2 then pairSlot = s; break end end
+                if pairSlot then clickSlot(pairSlot); SolvedSlots[slot2] = true; SolvedSlots[pairSlot] = true; task.wait(1.2)
+                else clickSlot(slot1); task.wait(1.2) end
+            else clickSlot(slot1); task.wait(1.2) end
+        elseif action == "Gamble2" then
+            local id1, count1 = clickAndRead(slot1)
+            if id1 then
+                local sig1 = id1; if count1 ~= "" then sig1 = id1 .. "_" .. count1 end
+                KnownCards[slot1] = {id = id1, count = count1, sig = sig1, cat = checkCategory(matchType, id1, count1), orderSeen = getOrderCounter()}
+                local pairSlot
+                for s, d in pairs(KnownCards) do if s ~= slot1 and not SolvedSlots[s] and d.sig == sig1 then pairSlot = s; break end end
+                if pairSlot then clickSlot(pairSlot); SolvedSlots[slot1] = true; SolvedSlots[pairSlot] = true; task.wait(1.2)
+                else
+                    local id2, count2 = clickAndRead(slot2)
+                    if id2 then
+                        local sig2 = id2; if count2 ~= "" then sig2 = id2 .. "_" .. count2 end
+                        KnownCards[slot2] = {id = id2, count = count2, sig = sig2, cat = checkCategory(matchType, id2, count2), orderSeen = getOrderCounter()}
+                        if sig1 == sig2 then SolvedSlots[slot1] = true; SolvedSlots[slot2] = true end
+                    end
+                    task.wait(1.2)
+                end
+            else clickSlot(slot2); task.wait(1.2) end
+        end
+    end
+
+    while _G.Running do
+        task.wait(0.1)
+        local activeBoard = getActiveBoard()
+        if not activeBoard then
+            if isSolvingMemoryMatch and tick() - lastMMPress > 5 then
+                isSolvingMemoryMatch = false; ActiveMemoryMatchName = nil
+            end
+            continue
+        end
+        
+        lastMMPress = tick()
+        if activeBoard ~= CurrentBoard then CurrentBoard = activeBoard; KnownCards = {}; SolvedSlots = {}; GlobalOrderCounter = 0; task.wait(1) end
+        
+        local grid = activeBoard:FindFirstChild("GuiGrid") and activeBoard.GuiGrid:FindFirstChild("GuiGrid")
+        if not grid then task.wait(1) continue end
+        
+        local available = {}
+        for _, child in pairs(grid:GetChildren()) do if child:IsA("Frame") and not SolvedSlots[child] then table.insert(available, child) end end
+        if #available == 0 then task.wait(2) continue end
+        
+        local matchType = ActiveMemoryMatchName or "Memory Match"
+        local action, slot1, slot2 = determineNextAction(matchType, available)
+        doTurn(matchType, action, slot1, slot2)
     end
 end)
 
@@ -208,7 +379,7 @@ local function processDisks()
                 if d and d.Parent then
                     local lootStart, timeout = nil, tick()
                     while d and d.Parent and (tick() - timeout < 3) do
-                        teleportTo(d.Position + Vector3.new(0, 1, 0)) -- Teleport exactly 1 stud above
+                        teleportTo(d.Position + Vector3.new(0, 1, 0))
                         game:GetService("ReplicatedStorage").Events.ToolCollect:FireServer()
                         if d.Transparency <= 0.05 and not lootStart then lootStart = tick() end
                         if lootStart and (tick() - lootStart > 0.14) then break end
@@ -230,16 +401,13 @@ table.insert(connections, RunService.Heartbeat:Connect(function()
     if not hrp then return end
     
     if isConvertingHoney then
-        -- 1. Auto "Make Honey" Clicker (Safe-scoped)
         local activateBtn = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui") and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
         if activateBtn and activateBtn:FindFirstChild("TextBox") then
-            local txt = activateBtn.TextBox.Text:lower()
-            if txt == "make honey" and tick() - lastHoneyEPress > 5 then
+            if activateBtn.TextBox.Text:lower() == "make honey" and tick() - lastHoneyEPress > 5 then
                 lastHoneyEPress = tick(); killMomentum(); pressEKey()
             end
         end
 
-        -- 2. Hive Proximity Failsafe
         local hPos = getHivePos()
         if hPos then
             local xzDist = Vector2.new(hrp.Position.X - hPos.X, hrp.Position.Z - hPos.Z).Magnitude
@@ -249,14 +417,12 @@ table.insert(connections, RunService.Heartbeat:Connect(function()
         return 
     end
 
-    -- 3. Field Stuck Failsafe
-    if not isCheckingBoosters and not activeBooster then
+    if not isCheckingBoosters and not activeBooster and not isSolvingMemoryMatch then
         if (hrp.Position.X < fieldBounds.x1 or hrp.Position.X > fieldBounds.x2 or hrp.Position.Z < fieldBounds.z1 or hrp.Position.Z > fieldBounds.z2) then
             if tick() - lastTimeInField > 10 then teleportTo(fieldCenter); lastTimeInField = tick() end
         else lastTimeInField = tick() end
     end
 
-    -- Verification Cleanup
     for t, time in pairs(verifyingTokens) do if not t.Parent or math.abs(t.Orientation.X) > 20 or tick() - time > 1.2 then verifyingTokens[t] = nil end end
 end))
 
@@ -334,58 +500,68 @@ table.insert(connections, RunService.RenderStepped:Connect(function()
     end
 end))
 
--- [[ BOOSTER & STATS BACKGROUND ]]
+-- [[ BACKGROUND STATS & BOOSTER TASK ]]
+local function parseCooldown(txt)
+    local h,m,s = txt:match("(%d+):(%d+):(%d+)"); if h then return tonumber(h)*3600 + tonumber(m)*60 + tonumber(s) end
+    local m2,s2 = txt:match("(%d+):(%d+)"); if m2 then return tonumber(m2)*60 + tonumber(s2) end
+    return nil
+end
+
 task.spawn(function()
     local btn = LocalPlayer.PlayerGui:WaitForChild("ScreenGui"):WaitForChild("ActivateButton")
     for name, data in pairs(Boosters) do
         teleportTo(data.pos); task.wait(1.8)
-        local bg, txt = btn.BackgroundColor3, btn.TextBox.Text; local cd = txt:match("(%d+):(%d+):(%d+)") or txt:match("(%d+):(%d+)")
+        local bg, txt = btn.BackgroundColor3, btn.TextBox.Text; local cd = parseCooldown(txt)
         if math.round(bg.R*255) == 201 and not cd then boosterPermaIgnore[name] = true
-        elseif cd then local h,m,s = txt:match("(%d+):(%d+):(%d+)"); local total = h and (h*3600+m*60+s) or (txt:match("(%d+):(%d+)") and (txt:match("(%d+)")*60 + txt:match(":(%d+)")))
-            task.delay(total or 60, function() if not boosterPermaIgnore[name] then table.insert(boosterQueue, name) end end)
+        elseif cd then task.delay(cd, function() if not boosterPermaIgnore[name] then table.insert(boosterQueue, name) end end)
         else table.insert(boosterQueue, name) end
     end
     isCheckingBoosters = false; teleportTo(fieldCenter)
-
-    -- Data Loop
+    
     while _G.Running do
-        task.wait(1)
-        -- File Buffering (Restored)
-        local cP, cC = LocalPlayer.CoreStats.Pollen.Value, LocalPlayer.CoreStats.Capacity.Value
-        table.insert(statsBuffer, string.format("%s,%d,%d,%d,%d,%d", os.date("%H:%M:%S"), LocalPlayer.CoreStats.Honey.Value, 0, cP, 0, cC))
-        if tick() - lastSaveTime >= SAVE_INTERVAL then flushBuffers(); lastSaveTime = tick() end
-
-        -- UI Update
-        local elapsed = tick() - startTime; local h = LocalPlayer.CoreStats.Honey.Value - initialHoney; local hps, pps = h/elapsed, totalPollenCollected/elapsed
+        task.wait(1); local elapsed = tick() - startTime; local h = LocalPlayer.CoreStats.Honey.Value - initialHoney
+        local hps, pps = h/elapsed, totalPollenCollected/elapsed
+        
         UI_Stats.hS.Text = "H/s: "..formatNumber(hps); UI_Stats.hM.Text = "H/m: "..formatNumber(hps*60); UI_Stats.hH.Text = "H/h: "..formatNumber(hps*3600)
         UI_Stats.pS.Text = "P/s: "..formatNumber(pps); UI_Stats.pM.Text = "P/m: "..formatNumber(pps*60); UI_Stats.pH.Text = "P/h: "..formatNumber(pps*3600)
         UI_Stats.total.Text = "Total: "..formatNumber(h); UI_Stats.time.Text = "Time: "..os.date("!%X", elapsed)
+        
+        -- CSV Logs 
+        local cP, cC = LocalPlayer.CoreStats.Pollen.Value, LocalPlayer.CoreStats.Capacity.Value
+        table.insert(statsBuffer, string.format("%s,%d,%d,%d,%d,%d", os.date("%H:%M:%S"), LocalPlayer.CoreStats.Honey.Value, hps, cP, pps, cC))
+        if tick() - lastSaveTime >= SAVE_INTERVAL then flushBuffers(); lastSaveTime = tick() end
 
-        -- Booster Logic
-        if #boosterQueue > 0 and not isConvertingHoney and not activeBooster and not warningDisks.processing then
-            activeBooster = true; local b = table.remove(boosterQueue, 1); teleportTo(Boosters[b].pos); task.wait(1.5); pressEKey()
+        -- Execute Booster / Memory Match
+        if #boosterQueue > 0 and not isConvertingHoney and not activeBooster and not warningDisks.processing and not isSolvingMemoryMatch then
+            activeBooster = true; local b = table.remove(boosterQueue, 1); teleportTo(Boosters[b].pos); task.wait(1.5); pressEKey(); task.wait(0.5)
             
-            -- Targeted Vacuum
-            if Boosters[b].collectibles then
-                local spawnTimeout = tick()
-                local function getNearby()
-                    local c = {}
-                    for _, t in ipairs(workspace.Collectibles:GetChildren()) do if t:IsA("Part") and (t.Position - Boosters[b].pos).Magnitude < 30 then table.insert(c, t) end end
-                    return c
+            if Boosters[b].isMM then
+                ActiveMemoryMatchName = b; isSolvingMemoryMatch = true; lastMMPress = tick()
+                task.delay(Boosters[b].time, function() if not boosterPermaIgnore[b] then table.insert(boosterQueue, b) end end)
+                activeBooster = false; teleportTo(fieldCenter)
+            else
+                if Boosters[b].collectibles then
+                    local spawnTimeout = tick()
+                    local function getNearby()
+                        local c = {}
+                        for _, t in ipairs(workspace.Collectibles:GetChildren()) do if t:IsA("Part") and (t.Position - Boosters[b].pos).Magnitude < 30 then table.insert(c, t) end end
+                        return c
+                    end
+                    repeat task.wait(0.1) until #getNearby() > 0 or tick() - spawnTimeout > 6
+                    local vacStart = tick()
+                    while tick() - vacStart < 12 do
+                        local n = getNearby(); if #n == 0 then break end
+                        for _, t in ipairs(n) do teleportTo(t.Position); task.wait(0.05) end
+                    end
                 end
-                repeat task.wait(0.1) until #getNearby() > 0 or tick() - spawnTimeout > 6
-                local vacStart = tick()
-                while tick() - vacStart < 12 do
-                    local n = getNearby(); if #n == 0 then break end
-                    for _, t in ipairs(n) do teleportTo(t.Position); task.wait(0.05) end
-                end
+                task.delay(Boosters[b].time, function() if not boosterPermaIgnore[b] then table.insert(boosterQueue, b) end end)
+                task.wait(1.5); activeBooster = false; teleportTo(fieldCenter)
             end
-            task.delay(Boosters[b].time, function() if not boosterPermaIgnore[b] then table.insert(boosterQueue, b) end end); task.wait(1.5); activeBooster = false; teleportTo(fieldCenter)
         end
     end
 end)
 
--- [[ TILE MONITOR (Restored) ]]
+-- [[ TILE MONITOR ]]
 task.spawn(function()
     while _G.Running do
         task.wait(0.25)
@@ -417,3 +593,4 @@ end)
 
 -- Anti-Idle
 table.insert(connections, LocalPlayer.Idled:Connect(function() VUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame); task.wait(1); VUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame) end))
+print("✅ True Ultimate Master V11 Loaded - All Systems Nominal.")
