@@ -120,7 +120,7 @@ local function createUI()
     local main = Instance.new("Frame", sg); main.Size = UDim2.new(0, 250, 0, 320); main.Position = UDim2.new(0.05, 0, 0.3, 0); main.BackgroundColor3 = Color3.fromRGB(15,15,15); main.BorderSizePixel = 0; main.Active = true; main.Draggable = true
     local uiScale = Instance.new("UIScale", main)
     local top = Instance.new("Frame", main); top.Size = UDim2.new(1,0,0,30); top.BackgroundColor3 = Color3.fromRGB(30,30,30); top.BorderSizePixel = 0
-    local title = Instance.new("TextLabel", top); title.Size = UDim2.new(0.7,0,1,0); title.Text = "  BSS MASTER V12"; title.TextColor3 = Color3.new(1,1,1); title.BackgroundTransparency = 1; title.TextXAlignment = Enum.TextXAlignment.Left; title.Font = Enum.Font.Code
+    local title = Instance.new("TextLabel", top); title.Size = UDim2.new(0.7,0,1,0); title.Text = "  BSS MASTER V13"; title.TextColor3 = Color3.new(1,1,1); title.BackgroundTransparency = 1; title.TextXAlignment = Enum.TextXAlignment.Left; title.Font = Enum.Font.Code
     local dBtn = Instance.new("TextButton", top); dBtn.Size = UDim2.new(0.25,0,0.8,0); dBtn.Position = UDim2.new(0.72,0,0.1,0); dBtn.BackgroundColor3 = Color3.fromRGB(180,40,40); dBtn.Text = "STOP"; dBtn.TextColor3 = Color3.new(1,1,1)
     local cont = Instance.new("Frame", main); cont.Size = UDim2.new(0.9,0,0.7,0); cont.Position = UDim2.new(0.05,0,0.12,0); cont.BackgroundTransparency = 1
     Instance.new("UIListLayout", cont).Padding = UDim.new(0,5)
@@ -155,7 +155,7 @@ task.spawn(function()
     end
 end)
 
--- [[ INVISIBLE MEMORY MATCH SOLVER ]]
+-- [[ INVISIBLE MEMORY MATCH SOLVER (OPTIMIZED) ]]
 task.spawn(function()
     local KnownCards, SolvedSlots, CurrentBoard = {}, {}, nil
     local GlobalOrderCounter = 0
@@ -249,9 +249,10 @@ task.spawn(function()
     end
 
     local function determineNextAction(matchType, availableSlots)
-        local listBMatches, listAMatches, commonMatches, seenListB, seenListA = {}, {}, {}, {}, {}
+        local listBMatches, listAMatches, commonMatches = {}, {}, {}
         local idToSlot = {}
         
+        -- 1. IDENTIFY MATCHES IN MEMORY
         for slot, data in pairs(KnownCards) do
             if not SolvedSlots[slot] then
                 if idToSlot[data.sig] then
@@ -261,8 +262,6 @@ task.spawn(function()
                     elseif data.cat == "Common" then table.insert(commonMatches, pair) end
                 else
                     idToSlot[data.sig] = slot
-                    if data.cat == "ListB" then table.insert(seenListB, {s = slot, order = data.orderSeen})
-                    elseif data.cat == "ListA" then table.insert(seenListA, {s = slot, order = data.orderSeen}) end
                 end
             end
         end
@@ -270,33 +269,28 @@ task.spawn(function()
         table.sort(listBMatches, function(a,b) return a.order < b.order end)
         table.sort(listAMatches, function(a,b) return a.order < b.order end)
         table.sort(commonMatches, function(a,b) return a.order < b.order end)
-        table.sort(seenListB, function(a,b) return a.order < b.order end)
-        table.sort(seenListA, function(a,b) return a.order < b.order end)
         
         if #listBMatches > 0 then return "Match", listBMatches[1].c1, listBMatches[1].c2 end
         if #listAMatches > 0 then return "Match", listAMatches[1].c1, listAMatches[1].c2 end
         
-        local unk = {}
-        for _, s in ipairs(availableSlots) do if not KnownCards[s] then table.insert(unk, s) end end
+        -- 2. EXPLORE UNKNOWNS (2x Info Gain)
+        local unknowns = {}
+        for _, s in ipairs(availableSlots) do if not KnownCards[s] then table.insert(unknowns, s) end end
         
-        if #unk > 0 then
-            if #seenListB > 0 then return "Gamble", seenListB[1].s, unk[math.random(1, #unk)] end
-            if #seenListA > 0 then return "Gamble", seenListA[1].s, unk[math.random(1, #unk)] end
+        if #unknowns >= 2 then
+            local u1 = table.remove(unknowns, math.random(1, #unknowns))
+            local u2 = table.remove(unknowns, math.random(1, #unknowns))
+            return "Explore", u1, u2
+        elseif #unknowns == 1 then
+            -- Fallback: Anchor 1 known + 1 unknown
+            local u1 = unknowns[1]
+            local anchor = nil
+            for s, d in pairs(KnownCards) do if not SolvedSlots[s] and d.cat ~= "Ignore" then anchor = s; break end end
+            if not anchor then anchor = availableSlots[1] == u1 and availableSlots[2] or availableSlots[1] end
+            return "Explore", u1, anchor
         end
         
         if #commonMatches > 0 then return "Match", commonMatches[1].c1, commonMatches[1].c2 end
-        
-        if #unk >= 2 then
-            local u1 = unk[math.random(1, #unk)]
-            local u2; repeat u2 = unk[math.random(1, #unk)] until u2 ~= u1
-            return "Gamble2", u1, u2
-        elseif #unk == 1 then
-            local u1 = unk[1]; local pick
-            for s, d in pairs(KnownCards) do if not SolvedSlots[s] and d.cat ~= "Ignore" then pick = s; break end end
-            if not pick then pick = availableSlots[1] end
-            if pick == u1 then pick = availableSlots[2] end
-            return "Gamble2", u1, pick
-        end
         return "Random", availableSlots[1], availableSlots[2]
     end
 
@@ -305,24 +299,18 @@ task.spawn(function()
             clickSlot(slot1); task.wait(0.2); clickSlot(slot2)
             SolvedSlots[slot1] = true; SolvedSlots[slot2] = true
             task.wait(1.2)
-        elseif action == "Gamble" then
-            local id2, count2 = clickAndRead(slot2)
-            if id2 then
-                local sig2 = id2; if count2 ~= "" then sig2 = id2 .. "_" .. count2 end
-                KnownCards[slot2] = {id = id2, count = count2, sig = sig2, cat = checkCategory(matchType, id2, count2), orderSeen = getOrderCounter()}
-                local pairSlot
-                for s, d in pairs(KnownCards) do if s ~= slot2 and not SolvedSlots[s] and d.sig == sig2 then pairSlot = s; break end end
-                if pairSlot then clickSlot(pairSlot); SolvedSlots[slot2] = true; SolvedSlots[pairSlot] = true; task.wait(1.2)
-                else clickSlot(slot1); task.wait(1.2) end
-            else clickSlot(slot1); task.wait(1.2) end
-        elseif action == "Gamble2" then
+        elseif action == "Explore" then
             local id1, count1 = clickAndRead(slot1)
             if id1 then
                 local sig1 = id1; if count1 ~= "" then sig1 = id1 .. "_" .. count1 end
                 KnownCards[slot1] = {id = id1, count = count1, sig = sig1, cat = checkCategory(matchType, id1, count1), orderSeen = getOrderCounter()}
+                
+                -- Check for match immediately
                 local pairSlot
                 for s, d in pairs(KnownCards) do if s ~= slot1 and not SolvedSlots[s] and d.sig == sig1 then pairSlot = s; break end end
-                if pairSlot then clickSlot(pairSlot); SolvedSlots[slot1] = true; SolvedSlots[pairSlot] = true; task.wait(1.2)
+                
+                if pairSlot then
+                    clickSlot(pairSlot); SolvedSlots[slot1] = true; SolvedSlots[pairSlot] = true; task.wait(1.2)
                 else
                     local id2, count2 = clickAndRead(slot2)
                     if id2 then
@@ -342,7 +330,7 @@ task.spawn(function()
         if not activeBoard then
             if isSolvingMemoryMatch and tick() - lastMMPress > 5 then
                 isSolvingMemoryMatch = false; ActiveMemoryMatchName = nil
-                task.wait(5) -- Explicit cooldown after match closes
+                task.wait(5)
             end
             continue
         end
@@ -538,15 +526,17 @@ task.spawn(function()
         UI_Stats.pS.Text = "P/s: "..formatNumber(pps); UI_Stats.pM.Text = "P/m: "..formatNumber(pps*60); UI_Stats.pH.Text = "P/h: "..formatNumber(pps*3600)
         UI_Stats.total.Text = "Total: "..formatNumber(h); UI_Stats.time.Text = "Time: "..os.date("!%X", elapsed)
         
+        -- CSV Logs 
         local cP, cC = LocalPlayer.CoreStats.Pollen.Value, LocalPlayer.CoreStats.Capacity.Value
         table.insert(statsBuffer, string.format("%s,%d,%d,%d,%d,%d", os.date("%H:%M:%S"), LocalPlayer.CoreStats.Honey.Value, hps, cP, pps, cC))
         if tick() - lastSaveTime >= SAVE_INTERVAL then flushBuffers(); lastSaveTime = tick() end
 
+        -- Execute Booster / Memory Match
         if #boosterQueue > 0 and not isConvertingHoney and not activeBooster and not warningDisks.processing and not isSolvingMemoryMatch then
-            activeBooster = true; local b = table.remove(boosterQueue, 1); teleportTo(Boosters[b].pos); task.wait(1.5); pressEKey()
+            activeBooster = true; local b = table.remove(boosterQueue, 1); teleportTo(Boosters[b].pos); task.wait(1.5); pressEKey(); task.wait(0.5)
             
             if Boosters[b].isMM then
-                task.wait(4) -- Wait for UI to open
+                task.wait(4) -- Wait for UI to animate open
                 ActiveMemoryMatchName = b; isSolvingMemoryMatch = true; lastMMPress = tick()
                 task.delay(Boosters[b].time, function() if not boosterPermaIgnore[b] then table.insert(boosterQueue, b) end end)
                 activeBooster = false; teleportTo(fieldCenter)
