@@ -120,7 +120,7 @@ local function createUI()
     local main = Instance.new("Frame", sg); main.Size = UDim2.new(0, 250, 0, 320); main.Position = UDim2.new(0.05, 0, 0.3, 0); main.BackgroundColor3 = Color3.fromRGB(15,15,15); main.BorderSizePixel = 0; main.Active = true; main.Draggable = true
     local uiScale = Instance.new("UIScale", main)
     local top = Instance.new("Frame", main); top.Size = UDim2.new(1,0,0,30); top.BackgroundColor3 = Color3.fromRGB(30,30,30); top.BorderSizePixel = 0
-    local title = Instance.new("TextLabel", top); title.Size = UDim2.new(0.7,0,1,0); title.Text = "  BSS MASTER V13"; title.TextColor3 = Color3.new(1,1,1); title.BackgroundTransparency = 1; title.TextXAlignment = Enum.TextXAlignment.Left; title.Font = Enum.Font.Code
+    local title = Instance.new("TextLabel", top); title.Size = UDim2.new(0.7,0,1,0); title.Text = "  BSS MASTER V14"; title.TextColor3 = Color3.new(1,1,1); title.BackgroundTransparency = 1; title.TextXAlignment = Enum.TextXAlignment.Left; title.Font = Enum.Font.Code
     local dBtn = Instance.new("TextButton", top); dBtn.Size = UDim2.new(0.25,0,0.8,0); dBtn.Position = UDim2.new(0.72,0,0.1,0); dBtn.BackgroundColor3 = Color3.fromRGB(180,40,40); dBtn.Text = "STOP"; dBtn.TextColor3 = Color3.new(1,1,1)
     local cont = Instance.new("Frame", main); cont.Size = UDim2.new(0.9,0,0.7,0); cont.Position = UDim2.new(0.05,0,0.12,0); cont.BackgroundTransparency = 1
     Instance.new("UIListLayout", cont).Padding = UDim.new(0,5)
@@ -155,7 +155,7 @@ task.spawn(function()
     end
 end)
 
--- [[ INVISIBLE MEMORY MATCH SOLVER (OPTIMIZED) ]]
+-- [[ INVISIBLE MEMORY MATCH SOLVER (STRICT IGNORE FIX) ]]
 task.spawn(function()
     local KnownCards, SolvedSlots, CurrentBoard = {}, {}, nil
     local GlobalOrderCounter = 0
@@ -179,7 +179,7 @@ task.spawn(function()
             ListB = { ["2676671613"]=true,["2028603146"]=true }
         },
         ["Extreme Memory Match"] = {
-            Ignore = { ["2028574353"]=true,["1471882621"]=true, ["1838129169"]=true,["8277901755"]=true },
+            Ignore = { ["2028574353"]=true,["1471882621"]=true, ["1838129169"]=true, ["8277901755"]=true },
             ListA = {["2319943273"]=true, ["2542899798"]=true, ["2542899798_x5"]=true,["3835877932"]=true },
             ListB = {["1471850677"]=true, ["1471849394"]=true,["15529301204"]=true,["2028603146"]=true }
         }
@@ -252,9 +252,9 @@ task.spawn(function()
         local listBMatches, listAMatches, commonMatches = {}, {}, {}
         local idToSlot = {}
         
-        -- 1. IDENTIFY MATCHES IN MEMORY
+        -- Sort Matches: Strictly IGNORE "Ignore" category
         for slot, data in pairs(KnownCards) do
-            if not SolvedSlots[slot] then
+            if not SolvedSlots[slot] and data.cat ~= "Ignore" then
                 if idToSlot[data.sig] then
                     local pair = {c1 = idToSlot[data.sig], c2 = slot, order = KnownCards[idToSlot[data.sig]].orderSeen}
                     if data.cat == "ListB" then table.insert(listBMatches, pair)
@@ -273,7 +273,7 @@ task.spawn(function()
         if #listBMatches > 0 then return "Match", listBMatches[1].c1, listBMatches[1].c2 end
         if #listAMatches > 0 then return "Match", listAMatches[1].c1, listAMatches[1].c2 end
         
-        -- 2. EXPLORE UNKNOWNS (2x Info Gain)
+        -- EXPLORE UNKNOWNS (Do not pick known Ignores)
         local unknowns = {}
         for _, s in ipairs(availableSlots) do if not KnownCards[s] then table.insert(unknowns, s) end end
         
@@ -282,7 +282,7 @@ task.spawn(function()
             local u2 = table.remove(unknowns, math.random(1, #unknowns))
             return "Explore", u1, u2
         elseif #unknowns == 1 then
-            -- Fallback: Anchor 1 known + 1 unknown
+            -- Fallback: If only 1 unknown left, pair with anything valid (not ignore)
             local u1 = unknowns[1]
             local anchor = nil
             for s, d in pairs(KnownCards) do if not SolvedSlots[s] and d.cat ~= "Ignore" then anchor = s; break end end
@@ -290,7 +290,10 @@ task.spawn(function()
             return "Explore", u1, anchor
         end
         
+        -- If no unknowns and no high priority matches, take common match or just random valid slots
         if #commonMatches > 0 then return "Match", commonMatches[1].c1, commonMatches[1].c2 end
+        
+        -- Last Resort (Board full of ignores/solved): Pick 2 random available slots
         return "Random", availableSlots[1], availableSlots[2]
     end
 
@@ -305,9 +308,11 @@ task.spawn(function()
                 local sig1 = id1; if count1 ~= "" then sig1 = id1 .. "_" .. count1 end
                 KnownCards[slot1] = {id = id1, count = count1, sig = sig1, cat = checkCategory(matchType, id1, count1), orderSeen = getOrderCounter()}
                 
-                -- Check for match immediately
                 local pairSlot
-                for s, d in pairs(KnownCards) do if s ~= slot1 and not SolvedSlots[s] and d.sig == sig1 then pairSlot = s; break end end
+                -- Check match, but SKIP IGNORES
+                if KnownCards[slot1].cat ~= "Ignore" then
+                    for s, d in pairs(KnownCards) do if s ~= slot1 and not SolvedSlots[s] and d.sig == sig1 then pairSlot = s; break end end
+                end
                 
                 if pairSlot then
                     clickSlot(pairSlot); SolvedSlots[slot1] = true; SolvedSlots[pairSlot] = true; task.wait(1.2)
@@ -316,7 +321,7 @@ task.spawn(function()
                     if id2 then
                         local sig2 = id2; if count2 ~= "" then sig2 = id2 .. "_" .. count2 end
                         KnownCards[slot2] = {id = id2, count = count2, sig = sig2, cat = checkCategory(matchType, id2, count2), orderSeen = getOrderCounter()}
-                        if sig1 == sig2 then SolvedSlots[slot1] = true; SolvedSlots[slot2] = true end
+                        if sig1 == sig2 and KnownCards[slot2].cat ~= "Ignore" then SolvedSlots[slot1] = true; SolvedSlots[slot2] = true end
                     end
                     task.wait(1.2)
                 end
@@ -526,60 +531,55 @@ task.spawn(function()
         UI_Stats.pS.Text = "P/s: "..formatNumber(pps); UI_Stats.pM.Text = "P/m: "..formatNumber(pps*60); UI_Stats.pH.Text = "P/h: "..formatNumber(pps*3600)
         UI_Stats.total.Text = "Total: "..formatNumber(h); UI_Stats.time.Text = "Time: "..os.date("!%X", elapsed)
         
-        -- CSV Logs 
         local cP, cC = LocalPlayer.CoreStats.Pollen.Value, LocalPlayer.CoreStats.Capacity.Value
         table.insert(statsBuffer, string.format("%s,%d,%d,%d,%d,%d", os.date("%H:%M:%S"), LocalPlayer.CoreStats.Honey.Value, hps, cP, pps, cC))
         if tick() - lastSaveTime >= SAVE_INTERVAL then flushBuffers(); lastSaveTime = tick() end
 
-        -- Execute Booster / Memory Match
         if #boosterQueue > 0 and not isConvertingHoney and not activeBooster and not warningDisks.processing and not isSolvingMemoryMatch then
-            activeBooster = true; local b = table.remove(boosterQueue, 1); teleportTo(Boosters[b].pos); task.wait(1.5); pressEKey(); task.wait(0.5)
+            activeBooster = true; local b = table.remove(boosterQueue, 1); teleportTo(Boosters[b].pos)
             
-            if Boosters[b].isMM then
-                task.wait(4) -- Wait for UI to animate open
-                ActiveMemoryMatchName = b; isSolvingMemoryMatch = true; lastMMPress = tick()
-                task.delay(Boosters[b].time, function() if not boosterPermaIgnore[b] then table.insert(boosterQueue, b) end end)
-                activeBooster = false; teleportTo(fieldCenter)
+            -- DOUBLE CHECK COOLDOWN ON ARRIVAL
+            task.wait(1.5)
+            local checkBtn = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui") and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
+            local currentTxt = checkBtn and checkBtn:FindFirstChild("TextBox") and checkBtn.TextBox.Text or ""
+            local currentBg = checkBtn and checkBtn.BackgroundColor3
+            local currentCd = parseCooldown(currentTxt)
+            
+            if currentBg and math.round(currentBg.R*255) == 201 and not currentCd then
+                -- Red, no time: Ignore
+                boosterPermaIgnore[b] = true
+                activeBooster = false
+            elseif currentCd then
+                -- Has cooldown: Reschedule
+                task.delay(currentCd, function() if not boosterPermaIgnore[b] then table.insert(boosterQueue, b) end end)
+                activeBooster = false
             else
-                if Boosters[b].collectibles then
-                    local spawnTimeout = tick()
-                    local function getNearby()
-                        local c = {}
-                        for _, t in ipairs(workspace.Collectibles:GetChildren()) do if t:IsA("Part") and (t.Position - Boosters[b].pos).Magnitude < 30 then table.insert(c, t) end end
-                        return c
+                -- Ready to use
+                pressEKey(); task.wait(0.5)
+                if Boosters[b].isMM then
+                    task.wait(4)
+                    ActiveMemoryMatchName = b; isSolvingMemoryMatch = true; lastMMPress = tick()
+                    task.delay(Boosters[b].time, function() if not boosterPermaIgnore[b] then table.insert(boosterQueue, b) end end)
+                    activeBooster = false; teleportTo(fieldCenter)
+                else
+                    if Boosters[b].collectibles then
+                        local spawnTimeout = tick()
+                        local function getNearby()
+                            local c = {}
+                            for _, t in ipairs(workspace.Collectibles:GetChildren()) do if t:IsA("Part") and (t.Position - Boosters[b].pos).Magnitude < 30 then table.insert(c, t) end end
+                            return c
+                        end
+                        repeat task.wait(0.1) until #getNearby() > 0 or tick() - spawnTimeout > 6
+                        local vacStart = tick()
+                        while tick() - vacStart < 12 do
+                            local n = getNearby(); if #n == 0 then break end
+                            for _, t in ipairs(n) do teleportTo(t.Position); task.wait(0.05) end
+                        end
                     end
-                    repeat task.wait(0.1) until #getNearby() > 0 or tick() - spawnTimeout > 6
-                    local vacStart = tick()
-                    while tick() - vacStart < 12 do
-                        local n = getNearby(); if #n == 0 then break end
-                        for _, t in ipairs(n) do teleportTo(t.Position); task.wait(0.05) end
-                    end
-                end
-                task.delay(Boosters[b].time, function() if not boosterPermaIgnore[b] then table.insert(boosterQueue, b) end end)
-                task.wait(1.5); activeBooster = false; teleportTo(fieldCenter)
-            end
-        end
-    end
-end)
-
--- [[ TILE MONITOR ]]
-task.spawn(function()
-    while _G.Running do
-        task.wait(0.25)
-        local grid = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui") and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("TileGrid")
-        if grid then
-            local current = {}
-            for _, tile in ipairs(grid:GetChildren()) do
-                if tile.Name == "IconTile" and tile:FindFirstChild("BG") and tile.BG:FindFirstChild("Icon") then
-                    local id = tile.BG.Icon.Image:match("%d+")
-                    if monitoredTiles[id] then
-                        local tid, mult = "T"..id, (tile.BG:FindFirstChild("Text") and tile.BG.Text.ContentText ~= "" and tile.BG.Text.ContentText or "x1")
-                        current[tid] = true
-                        if tileStates[tid] ~= mult then tileStates[tid] = mult; table.insert(tilesBuffer, string.format("%s,%s,%s,Active", os.date("%H:%M:%S"), tid, mult)) end
-                    end
+                    task.delay(Boosters[b].time, function() if not boosterPermaIgnore[b] then table.insert(boosterQueue, b) end end)
+                    task.wait(1.5); activeBooster = false; teleportTo(fieldCenter)
                 end
             end
-            for tid, _ in pairs(tileStates) do if not current[tid] then tileStates[tid] = nil; table.insert(tilesBuffer, string.format("%s,%s,x0,Removed", os.date("%H:%M:%S"), tid)) end end
         end
     end
 end)
