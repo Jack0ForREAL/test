@@ -1096,98 +1096,78 @@ task.spawn(function()
         local cP, cC = LocalPlayer.CoreStats.Pollen.Value, LocalPlayer.CoreStats.Capacity.Value
         table.insert(statsBuffer, string.format("%s,%d,%d,%d,%d,%d", os.date("%H:%M:%S"), LocalPlayer.CoreStats.Honey.Value, math.floor(hps), cP, math.floor(pps), cC))
         if tick()-lastSaveTime >= SAVE_INTERVAL then flushBuffers(); lastSaveTime=tick() end
+    end
+end)
 
-        -- ---- Booster dispatch ----
-        if isFarming and #boosterQueue > 0 and not isConvertingHoney and not activeBooster and not warningDisks.processing and not isSolvingMemoryMatch and not isCheckingBoosters then
-            activeBooster = true
-            local b = table.remove(boosterQueue, 1)
-            if boosterUILabels[b] then
-                boosterUILabels[b].Text = "  "..b..":  🔄 Claiming"
-                boosterUILabels[b].TextColor3 = Color3.fromRGB(80,180,255)
+-- =============================================================================
+-- [[ 9b. BOOSTER DISPATCH (dedicated loop - never re-enters itself) ]]
+-- =============================================================================
+task.spawn(function()
+    while _G.Running do
+        task.wait(1)
+        if not isFarming then continue end
+        if #boosterQueue == 0 then continue end
+        if isConvertingHoney or activeBooster or warningDisks.processing or isSolvingMemoryMatch or isCheckingBoosters then continue end
+
+        -- Grab next booster - set activeBooster immediately so nothing else can grab it
+        activeBooster = true
+        local b = table.remove(boosterQueue, 1)
+        if not b or not Boosters[b] then activeBooster = false; continue end
+
+        if boosterUILabels[b] then
+            boosterUILabels[b].Text = "  "..b..":  🔄 Claiming"
+            boosterUILabels[b].TextColor3 = Color3.fromRGB(80,180,255)
+        end
+
+        -- Teleport + cancel movement
+        teleportTo(Boosters[b].pos)
+        task.wait(1.5)
+        local _c = LocalPlayer.Character
+        local _h = _c and _c:FindFirstChild("Humanoid")
+        local _r = _c and _c:FindFirstChild("HumanoidRootPart")
+        if _h and _r then _h:MoveTo(_r.Position) end
+
+        pressEKey()
+        task.wait(0.5)
+
+        if Boosters[b].isMM then
+            -- Verify board opened (pollen=0, board visible, chances >= 1)
+            local boardFound = false
+            local waitStart  = tick()
+            while tick() - waitStart < 6 do
+                task.wait(0.25)
+                local sg2 = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui")
+                local ml  = sg2 and sg2:FindFirstChild("MinigameLayer")
+                if ml then
+                    for _, child in pairs(ml:GetChildren()) do
+                        if child.Name == "MemoryMatchFrame" then
+                            local lbl = child:FindFirstChild("ChancesFrame") and child.ChancesFrame:FindFirstChild("CountLabel")
+                            if lbl and (tonumber(string.match(lbl.ContentText or "", "%d+")) or 0) >= 1 then
+                                boardFound = true; break
+                            end
+                        end
+                    end
+                end
+                if boardFound then break end
             end
-            teleportTo(Boosters[b].pos); task.wait(1.5)
-            -- Cancel any movement the humanoid queued up after the teleport
-            local _char = LocalPlayer.Character
-            local _hum  = _char and _char:FindFirstChild("Humanoid")
-            local _hrp  = _char and _char:FindFirstChild("HumanoidRootPart")
-            if _hum and _hrp then _hum:MoveTo(_hrp.Position) end
-            pressEKey(); task.wait(0.5)
 
-            if Boosters[b].isMM then
-                -- Verify the board actually opened (no board = claim failed: on cooldown, cost gate, etc.)
-                local boardFound = false
-                local waitStart  = tick()
-                while tick() - waitStart < 6 do
-                    task.wait(0.25)
-                    local sg2 = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui")
-                    local ml  = sg2 and sg2:FindFirstChild("MinigameLayer")
-                    if ml then
-                        for _, child in pairs(ml:GetChildren()) do
-                            if child.Name == "MemoryMatchFrame" then
-                                local lbl = child:FindFirstChild("ChancesFrame") and child.ChancesFrame:FindFirstChild("CountLabel")
-                                if lbl and (tonumber(string.match(lbl.ContentText or "", "%d+")) or 0) >= 1 then
-                                    boardFound = true; break
-                                end
-                            end
-                        end
-                    end
-                    if boardFound then break end
+            if boardFound then
+                ActiveMemoryMatchName = b
+                isSolvingMemoryMatch  = true
+                lastMMPress           = tick()
+                if boosterUILabels[b] then
+                    boosterUILabels[b].Text = "  "..b..":  🧠 Solving"
+                    boosterUILabels[b].TextColor3 = Color3.fromRGB(180,120,255)
                 end
-
-                if boardFound then
-                    ActiveMemoryMatchName = b
-                    isSolvingMemoryMatch  = true
-                    lastMMPress           = tick()
-                    if boosterUILabels[b] then
-                        boosterUILabels[b].Text = "  "..b..":  🧠 Solving"
-                        boosterUILabels[b].TextColor3 = Color3.fromRGB(180,120,255)
-                    end
-                else
-                    -- Claim failed — re-read button text for accurate cooldown
-                    -- Handles both "x:xx:xx" style AND "Spend X,XXX,XXX honey to play ... (x:xx:xx)" style
-                    local cooldownSecs = Boosters[b].time
-                    local btn2 = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui") and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
-                    if btn2 and btn2:FindFirstChild("TextBox") then
-                        local btnTxt = btn2.TextBox.Text
-                        local cd = parseCooldown(btnTxt)  -- parseCooldown already handles any x:xx:xx anywhere in string
-                        if cd and cd > 0 then cooldownSecs = cd end
-                    end
-                    task.delay(cooldownSecs, function()
-                        if not boosterPermaIgnore[b] then
-                            table.insert(boosterQueue, b)
-                            if boosterUILabels[b] then
-                                boosterUILabels[b].Text = "  "..b..":  ✅ READY"
-                                boosterUILabels[b].TextColor3 = Color3.fromRGB(80,220,80)
-                            end
-                        end
-                    end)
-                    local timeStr = string.format("%dh %dm", math.floor(cooldownSecs/3600), math.floor((cooldownSecs%3600)/60))
-                    if boosterUILabels[b] then
-                        boosterUILabels[b].Text = "  "..b..":  ⏳ "..timeStr.." (skipped)"
-                        boosterUILabels[b].TextColor3 = Color3.fromRGB(200,120,60)
-                    end
-                end
-                -- re-queue on success is handled inside the MM solver thread after board closes
-                activeBooster = false
-                teleportTo(getFieldCenter())
             else
-                if Boosters[b].collectibles then
-                    local spawnTimeout = tick()
-                    local function getNearby()
-                        local c = {}
-                        for _, t in ipairs(workspace.Collectibles:GetChildren()) do
-                            if t:IsA("Part") and (t.Position - Boosters[b].pos).Magnitude < 30 then table.insert(c,t) end
-                        end
-                        return c
-                    end
-                    repeat task.wait(0.1) until #getNearby()>0 or tick()-spawnTimeout>6
-                    local vacStart = tick()
-                    while tick()-vacStart < 12 do
-                        local n2 = getNearby(); if #n2==0 then break end
-                        for _, t in ipairs(n2) do teleportTo(t.Position); task.wait(0.05) end
-                    end
+                -- Board never opened — read cooldown from button text
+                local cooldownSecs = Boosters[b].time
+                local btn2 = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui") and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
+                if btn2 and btn2:FindFirstChild("TextBox") then
+                    local cd = parseCooldown(btn2.TextBox.Text)
+                    if cd and cd > 0 then cooldownSecs = cd end
                 end
-                task.delay(Boosters[b].time, function()
+                task.delay(cooldownSecs, function()
                     if not boosterPermaIgnore[b] then
                         table.insert(boosterQueue, b)
                         if boosterUILabels[b] then
@@ -1196,15 +1176,51 @@ task.spawn(function()
                         end
                     end
                 end)
+                local timeStr = string.format("%dh %dm", math.floor(cooldownSecs/3600), math.floor((cooldownSecs%3600)/60))
                 if boosterUILabels[b] then
-                    local timeStr = string.format("%dh %dm", math.floor(Boosters[b].time/3600), math.floor((Boosters[b].time%3600)/60))
-                    boosterUILabels[b].Text = "  "..b..":  ⏳ "..timeStr
-                    boosterUILabels[b].TextColor3 = Color3.fromRGB(200,180,60)
+                    boosterUILabels[b].Text = "  "..b..":  ⏳ "..timeStr.." (skipped)"
+                    boosterUILabels[b].TextColor3 = Color3.fromRGB(200,120,60)
                 end
-                task.wait(1.5)
-                activeBooster = false
-                teleportTo(getFieldCenter())
             end
+            -- re-queue on MM success handled inside MM solver thread
+            activeBooster = false
+            teleportTo(getFieldCenter())
+
+        else
+            -- Normal booster
+            if Boosters[b].collectibles then
+                local function getNearby()
+                    local c = {}
+                    for _, t in ipairs(workspace.Collectibles:GetChildren()) do
+                        if t:IsA("Part") and (t.Position - Boosters[b].pos).Magnitude < 30 then table.insert(c, t) end
+                    end
+                    return c
+                end
+                local spawnTimeout = tick()
+                repeat task.wait(0.1) until #getNearby() > 0 or tick()-spawnTimeout > 6
+                local vacStart = tick()
+                while tick()-vacStart < 12 do
+                    local n2 = getNearby(); if #n2 == 0 then break end
+                    for _, t in ipairs(n2) do teleportTo(t.Position); task.wait(0.05) end
+                end
+            end
+            task.delay(Boosters[b].time, function()
+                if not boosterPermaIgnore[b] then
+                    table.insert(boosterQueue, b)
+                    if boosterUILabels[b] then
+                        boosterUILabels[b].Text = "  "..b..":  ✅ READY"
+                        boosterUILabels[b].TextColor3 = Color3.fromRGB(80,220,80)
+                    end
+                end
+            end)
+            local timeStr = string.format("%dh %dm", math.floor(Boosters[b].time/3600), math.floor((Boosters[b].time%3600)/60))
+            if boosterUILabels[b] then
+                boosterUILabels[b].Text = "  "..b..":  ⏳ "..timeStr
+                boosterUILabels[b].TextColor3 = Color3.fromRGB(200,180,60)
+            end
+            task.wait(1.5)
+            activeBooster = false
+            teleportTo(getFieldCenter())
         end
     end
 end)
@@ -1212,6 +1228,8 @@ end)
 -- =============================================================================
 -- [[ 10. CORE FAILSAFES (Heartbeat) ]]
 -- =============================================================================
+local balloonBailPending = false  -- prevent multiple simultaneous balloon bail tasks
+
 table.insert(connections, RunService.Heartbeat:Connect(function()
     if not _G.Running then return end
     updateDisks()
@@ -1234,6 +1252,47 @@ table.insert(connections, RunService.Heartbeat:Connect(function()
             local yDist  = math.abs(hrp.Position.Y-hPos.Y)
             if xzDist > 5 or yDist > 30 then teleportTo(hPos) end
         end
+
+        -- Balloon check: pollen=0, button is red (actively converting), balloon nearby hive = balloon converting
+        -- Do this in a spawned task so we can wait 5s safely without blocking the heartbeat
+        local shouldIgnoreBalloon = ignoreBalloonForever or (tick() < ignoreBalloonUntil)
+        if not shouldIgnoreBalloon and not balloonBailPending then
+            local pol2 = LocalPlayer.CoreStats.Pollen.Value
+            -- Check if button is red (same RGB as booster unavailable = r~201, g~39, b~28 → actively converting)
+            local activateBtn2 = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui") and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
+            local isRedButton = false
+            if activateBtn2 then
+                local bg = activateBtn2.BackgroundColor3
+                local r,g,b2 = math.round(bg.R*255), math.round(bg.G*255), math.round(bg.B*255)
+                isRedButton = (r >= 180 and g <= 60 and b2 <= 60)  -- red = actively making honey
+            end
+            if pol2 == 0 and isRedButton then
+                -- Check for balloon near hive position
+                local hPos2 = getHivePos()
+                if hPos2 then
+                    local balloonNear = false
+                    local bal = workspace:FindFirstChild("Balloons")
+                    local hb  = bal and bal:FindFirstChild("HiveBalloons")
+                    if hb then
+                        for _, inst in ipairs(hb:GetDescendants()) do
+                            if inst.Name == "BalloonBody" and (inst.Position - hPos2).Magnitude < 30 then
+                                balloonNear = true; break
+                            end
+                        end
+                    end
+                    if balloonNear then
+                        balloonBailPending = true
+                        task.spawn(function()
+                            task.wait(5)  -- wait for balloon to finish
+                            isConvertingHoney  = false
+                            balloonBailPending = false
+                            teleportTo(getFieldCenter())
+                        end)
+                    end
+                end
+            end
+        end
+
         return
     end
 
@@ -1296,33 +1355,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function()
             if waitingForBees then waitingForBees=false; lastEmptiedTime=tick() end
         end
     else
-        -- Balloon check: if pollen=0 and still in conversion, wait 5s then bail
-        local shouldIgnoreBalloon = ignoreBalloonForever or (tick() < ignoreBalloonUntil)
-        if not shouldIgnoreBalloon and pol == 0 then
-            -- Check for nearby balloon
-            local balloonNear = false
-            local hPos2 = getHivePos()
-            if hPos2 then
-                local checkPos = hPos2
-                local bal = workspace:FindFirstChild("Balloons")
-                local hb  = bal and bal:FindFirstChild("HiveBalloons")
-                if hb then
-                    for _, inst in ipairs(hb:GetDescendants()) do
-                        if inst.Name == "BalloonBody" and (inst.Position - checkPos).Magnitude < 30 then
-                            balloonNear = true; break
-                        end
-                    end
-                end
-            end
-            if balloonNear then
-                task.wait(5)
-                isConvertingHoney = false
-                teleportTo(getFieldCenter())
-                return
-            end
-        end
-
-        -- Check if honey making finished
+        -- Check if honey making finished (button shows "Pollen From Flower Fields" = done)
         local activateBtn = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui") and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
         if activateBtn and activateBtn:FindFirstChild("TextBox") then
             if activateBtn.TextBox.Text:find("Pollen From Flower Fields") then
