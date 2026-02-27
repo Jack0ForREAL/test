@@ -15,17 +15,10 @@ local RepStorage = game:GetService("ReplicatedStorage")
 -- [[ CONFIGURATION ]]
 local Webhook_URL = "https://discord.com/api/webhooks/1328668957774839819/5-ooyV3yMEsU46cfNtF9NV8a0kyNA0u2Q4xXxeK5HEroIU5yCwqIcmq-8MM7V0bYGBwI"
 
--- [[ FIELD DATA ]]
+-- [[ DATA TABLES ]]
 local function calcField(v1, v2)
     local center = (v1 + v2) / 2
-    return {
-        center = center,
-        bounds = {
-            x1 = math.min(v1.X, v2.X), x2 = math.max(v1.X, v2.X),
-            z1 = math.min(v1.Z, v2.Z), z2 = math.max(v1.Z, v2.Z),
-            y = center.Y
-        }
-    }
+    return { center = center, bounds = { x1 = math.min(v1.X, v2.X), x2 = math.max(v1.X, v2.X), z1 = math.min(v1.Z, v2.Z), z2 = math.max(v1.Z, v2.Z), y = center.Y } }
 end
 
 local FieldsData = {
@@ -68,9 +61,6 @@ local State = {
     InitialBoosterCheckDone = false
 }
 
--- Farming State
-local connections = {}
-local firstAttemptTimes, permaIgnore, verifyingTokens = {}, {}, {}
 local warningDisks = { queue = {}, processing = false }
 local crosshairCounter, crosshairBlacklist = 0, {}
 local boosterQueue, boosterPermaIgnore = {}, {}
@@ -80,8 +70,8 @@ local lastTimeInField, lastWanderPos, lastWanderTime = tick(), nil, 0
 local isSolvingMemoryMatch, ActiveMemoryMatchName, lastMMPress = false, nil, 0
 local lastHoneyEPress = 0
 local currentTarget, currentTargetType = nil, nil
+local firstAttemptTimes, permaIgnore, verifyingTokens = {}, {}, {}
 
--- Stats
 local totalPollenCollected, lastPollenRaw = 0, LocalPlayer.CoreStats.Pollen.Value
 local startTime, initialHoney = tick(), LocalPlayer.CoreStats.Honey.Value
 local showIntervalStats = false 
@@ -130,91 +120,7 @@ end
 -------
 end)
 
--- [[ UI LIBRARY ]]
-local UI_Stats, UI_Boosters = nil, {}
-local function createUI()
-    local sg = Instance.new("ScreenGui", LocalPlayer.PlayerGui)
-    sg.Name = "BSS_V17_UI"; sg.ResetOnSpawn = false
-    local main = Instance.new("Frame", sg)
-    main.Name = "MainFrame"; main.Size = UDim2.new(0, 350, 0, 400); main.Position = UDim2.new(0.02, 0, 0.25, 0)
-    main.BackgroundColor3 = Color3.fromRGB(15, 15, 15); main.BorderSizePixel = 0; main.Active = true; main.Draggable = true
-    local scaleObj = Instance.new("UIScale", main)
-
-    -- Topbar
-    local topbar = Instance.new("Frame", main)
-    topbar.Size = UDim2.new(1, 0, 0, 35); topbar.BackgroundColor3 = Color3.fromRGB(25, 25, 25); topbar.BorderSizePixel = 0
-    local title = Instance.new("TextLabel", topbar)
-    title.Size = UDim2.new(0.6, 0, 1, 0); title.Position = UDim2.new(0.02, 0, 0, 0); title.Text = "BSS MASTER V17"; title.TextColor3 = Color3.new(1, 1, 1); title.BackgroundTransparency = 1; title.TextXAlignment = Enum.TextXAlignment.Left; title.Font = Enum.Font.Code; title.TextSize = 16
-    local destroyBtn = Instance.new("TextButton", topbar)
-    destroyBtn.Size = UDim2.new(0.25, 0, 0.8, 0); destroyBtn.Position = UDim2.new(0.73, 0, 0.1, 0); destroyBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40); destroyBtn.Text = "DESTROY"; destroyBtn.TextColor3 = Color3.new(1, 1, 1); destroyBtn.Font = Enum.Font.SourceSansBold
-    
-    local content = Instance.new("Frame", main); content.Size = UDim2.new(1, 0, 0.82, 0); content.Position = UDim2.new(0, 0, 0.18, 0); content.BackgroundTransparency = 1
-    local tabContainer = Instance.new("Frame", main); tabContainer.Size = UDim2.new(1, 0, 0, 30); tabContainer.Position = UDim2.new(0, 0, 0.09, 0); tabContainer.BackgroundColor3 = Color3.fromRGB(20, 20, 20); tabContainer.BorderSizePixel = 0
-    
-    local tabs = {}
-    local function switchTab(name) for n, f in pairs(tabs) do f.Visible = (n == name) end end
-    local function createTabBtn(name, pos)
-        local b = Instance.new("TextButton", tabContainer); b.Size = UDim2.new(0.25, 0, 1, 0); b.Position = UDim2.new(pos, 0, 0, 0); b.BackgroundTransparency = 1; b.Text = name; b.TextColor3 = Color3.new(1,1,1); b.Font = Enum.Font.SourceSansBold
-        local frame = Instance.new("ScrollingFrame", content); frame.Size = UDim2.new(1, -10, 1, -10); frame.Position = UDim2.new(0, 5, 0, 5); frame.BackgroundTransparency = 1; frame.ScrollBarThickness = 4; frame.Visible = false
-        tabs[name] = frame; local list = Instance.new("UIListLayout", frame); list.Padding = UDim.new(0, 5); list.SortOrder = Enum.SortOrder.LayoutOrder
-        b.MouseButton1Click:Connect(function() switchTab(name) end); return frame
-    end
-
-    local tabMain = createTabBtn("Dash", 0); local tabStats = createTabBtn("Stats", 0.25); local tabBoosters = createTabBtn("Boost", 0.5); local tabSettings = createTabBtn("Cfg", 0.75)
-
-    -- Dash
-    local startBtn = Instance.new("TextButton", tabMain); startBtn.Size = UDim2.new(1, 0, 0, 40); startBtn.BackgroundColor3 = Color3.fromRGB(40, 180, 40); startBtn.Text = "START FARMING"; startBtn.TextColor3 = Color3.new(1,1,1); startBtn.Font = Enum.Font.GothamBold; startBtn.LayoutOrder = 1
-    local fieldLabel = Instance.new("TextLabel", tabMain); fieldLabel.Size = UDim2.new(1, 0, 0, 20); fieldLabel.Text = "Select Field:"; fieldLabel.TextColor3 = Color3.new(0.8,0.8,0.8); fieldLabel.BackgroundTransparency = 1; fieldLabel.LayoutOrder = 2
-    local fieldScroll = Instance.new("ScrollingFrame", tabMain); fieldScroll.Size = UDim2.new(1, 0, 0, 120); fieldScroll.BackgroundColor3 = Color3.fromRGB(20, 20, 20); fieldScroll.LayoutOrder = 3
-    local fsLayout = Instance.new("UIListLayout", fieldScroll); fsLayout.Padding = UDim.new(0,2)
-    
-    for fname, _ in pairs(FieldsData) do
-        local b = Instance.new("TextButton", fieldScroll); b.Size = UDim2.new(1, -10, 0, 25); b.Text = fname; b.BackgroundColor3 = Color3.fromRGB(30, 30, 30); b.TextColor3 = Color3.new(1,1,1)
-        b.MouseButton1Click:Connect(function() State.CurrentField = fname; fieldLabel.Text = "Current: " .. fname end)
-    end
-    fieldScroll.CanvasSize = UDim2.new(0, 0, 0, 14 * 27)
-
-    -- Stats
-    local toggleStatsBtn = Instance.new("TextButton", tabStats); toggleStatsBtn.Size = UDim2.new(1, 0, 0, 30); toggleStatsBtn.Text = "View: Total Session"; toggleStatsBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 100); toggleStatsBtn.TextColor3 = Color3.new(1,1,1)
-    local statLabels = {}
-    local function addStat(id, color) local l = Instance.new("TextLabel", tabStats); l.Size = UDim2.new(1, 0, 0, 20); l.TextColor3 = color or Color3.new(1,1,1); l.BackgroundTransparency = 1; l.TextXAlignment = Enum.TextXAlignment.Left; statLabels[id] = l end
-    addStat("HPS"); addStat("HPM"); addStat("HPH"); addStat("PPS", Color3.fromRGB(150,255,150)); addStat("PPM", Color3.fromRGB(150,255,150)); addStat("PPH", Color3.fromRGB(150,255,150)); addStat("Total", Color3.new(1,0.8,0)); addStat("Time")
-    local mmHeader = Instance.new("TextLabel", tabStats); mmHeader.Size = UDim2.new(1, 0, 0, 25); mmHeader.Text = "-- MM REWARDS --"; mmHeader.TextColor3 = Color3.new(1,1,0); mmHeader.BackgroundTransparency = 1
-    local mmRewLabel = Instance.new("TextLabel", tabStats); mmRewLabel.Size = UDim2.new(1, 0, 0, 500); mmRewLabel.TextYAlignment = Enum.TextYAlignment.Top; mmRewLabel.TextXAlignment = Enum.TextXAlignment.Left; mmRewLabel.BackgroundTransparency = 1; mmRewLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9); mmRewLabel.Text = "No rewards yet."; statLabels.MM = mmRewLabel
-    
-    toggleStatsBtn.MouseButton1Click:Connect(function() showIntervalStats = not showIntervalStats; toggleStatsBtn.Text = showIntervalStats and "View: Interval (Current)" or "View: Total Session" end)
-
-    -- Boosters
-    UI_Boosters = {}
-    for bName, _ in pairs(Boosters) do local l = Instance.new("TextLabel", tabBoosters); l.Size = UDim2.new(1, 0, 0, 20); l.Text = bName .. ": Unknown"; l.TextColor3 = Color3.new(0.7, 0.7, 0.7); l.BackgroundTransparency = 1; l.TextXAlignment = Enum.TextXAlignment.Left; UI_Boosters[bName] = l end
-
-    -- Settings
-    local scaleBox = Instance.new("TextBox", tabSettings); scaleBox.Size = UDim2.new(1, 0, 0, 30); scaleBox.Text = "UI Scale: 1.0"; scaleBox.BackgroundColor3 = Color3.fromRGB(30,30,30); scaleBox.TextColor3 = Color3.new(1,1,1)
-    local balloonTgl = Instance.new("TextButton", tabSettings); balloonTgl.Size = UDim2.new(1, 0, 0, 30); balloonTgl.Text = "Ignore Balloons: OFF"; balloonTgl.BackgroundColor3 = Color3.fromRGB(60, 20, 20); balloonTgl.TextColor3 = Color3.new(1,1,1)
-    local balloonTimeBox = Instance.new("TextBox", tabSettings); balloonTimeBox.Size = UDim2.new(1, 0, 0, 30); balloonTimeBox.PlaceholderText = "Ignore for (e.g. 60m, 1h)"; balloonTimeBox.Text = ""; balloonTimeBox.BackgroundColor3 = Color3.fromRGB(30,30,30); balloonTimeBox.TextColor3 = Color3.new(1,1,1)
-
-    scaleBox.FocusLost:Connect(function() local v = tonumber(scaleBox.Text:match("[%d%.]+")); if v then scaleObj.Scale = math.clamp(v, 0.5, 3) end end)
-    balloonTgl.MouseButton1Click:Connect(function() State.IgnoreBalloonsForever = not State.IgnoreBalloonsForever; balloonTgl.Text = "Ignore Balloons: " .. (State.IgnoreBalloonsForever and "ON" or "OFF"); balloonTgl.BackgroundColor3 = State.IgnoreBalloonsForever and Color3.fromRGB(20, 60, 20) or Color3.fromRGB(60, 20, 20) end)
-    balloonTimeBox.FocusLost:Connect(function() local txt = balloonTimeBox.Text:lower(); local num = tonumber(txt:match("%d+")); if num then local mult = 1; if txt:find("h") then mult = 3600 elseif txt:find("m") then mult = 60 end; State.BalloonIgnoreUntil = tick() + (num * mult); balloonTimeBox.Text = "Ignoring until: " .. os.date("%X", State.BalloonIgnoreUntil) end end)
-
-    startBtn.MouseButton1Click:Connect(function()
-        State.IsFarming = not State.IsFarming
-        startBtn.Text = State.IsFarming and "STOP FARMING" or "START FARMING"
-        startBtn.BackgroundColor3 = State.IsFarming and Color3.fromRGB(180, 40, 40) or Color3.fromRGB(40, 180, 40)
-        if State.IsFarming then
-            if not State.InitialBoosterCheckDone then isCheckingBoosters = true end
-        else
-            killMomentum()
-        end
-    end)
-
-    destroyBtn.MouseButton1Click:Connect(function() _G.Running = false; for _, c in pairs(connections) do c:Disconnect() end; sg:Destroy() end)
-    switchTab("Dash")
-    return statLabels
-end
-UI_Stats = createUI()
-
--- [[ UTILS ]]
+-- [[ UTILITIES (DEFINED BEFORE UI) ]]
 local function formatNumber(n) return tostring(math.floor(n)):reverse():gsub("%d%d%d", "%1,"):reverse():gsub("^,", "") end
 local function killMomentum() local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart"); if hrp then hrp.Velocity, hrp.RotVelocity = Vector3.zero, Vector3.zero end end
 local function teleportTo(pos) local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart"); if hrp then killMomentum(); hrp.CFrame = CFrame.new(pos) end end
@@ -253,7 +159,249 @@ local function placeSprinkler()
     end
 end
 
--- [[ ASSET NAME CACHE ]]
+-- [[ UI LIBRARY ]]
+local UI_Stats, UI_Boosters = nil, {}
+local function createUI()
+    local sg = Instance.new("ScreenGui", LocalPlayer.PlayerGui)
+    sg.Name = "BSS_V17_UI"
+    sg.ResetOnSpawn = false
+
+    local main = Instance.new("Frame", sg)
+    main.Name = "MainFrame"
+    main.Size = UDim2.new(0, 350, 0, 400)
+    main.Position = UDim2.new(0.02, 0, 0.25, 0)
+    main.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+    main.BorderSizePixel = 0
+    main.Active = true
+    main.Draggable = true
+
+    local scaleObj = Instance.new("UIScale", main)
+
+    -- Topbar
+    local topbar = Instance.new("Frame", main)
+    topbar.Size = UDim2.new(1, 0, 0, 35)
+    topbar.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    topbar.BorderSizePixel = 0
+
+    local title = Instance.new("TextLabel", topbar)
+    title.Size = UDim2.new(0.6, 0, 1, 0)
+    title.Position = UDim2.new(0.02, 0, 0, 0)
+    title.Text = "BSS MASTER V18"
+    title.TextColor3 = Color3.new(1, 1, 1)
+    title.BackgroundTransparency = 1
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Font = Enum.Font.Code
+    title.TextSize = 16
+
+    local destroyBtn = Instance.new("TextButton", topbar)
+    destroyBtn.Size = UDim2.new(0.25, 0, 0.8, 0)
+    destroyBtn.Position = UDim2.new(0.73, 0, 0.1, 0)
+    destroyBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+    destroyBtn.Text = "DESTROY"
+    destroyBtn.TextColor3 = Color3.new(1, 1, 1)
+    destroyBtn.Font = Enum.Font.SourceSansBold
+    
+    local content = Instance.new("Frame", main)
+    content.Size = UDim2.new(1, 0, 0.82, 0)
+    content.Position = UDim2.new(0, 0, 0.18, 0)
+    content.BackgroundTransparency = 1
+
+    local tabContainer = Instance.new("Frame", main)
+    tabContainer.Size = UDim2.new(1, 0, 0, 30)
+    tabContainer.Position = UDim2.new(0, 0, 0.09, 0)
+    tabContainer.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    tabContainer.BorderSizePixel = 0
+    
+    local tabs = {}
+    local function switchTab(name) for n, f in pairs(tabs) do f.Visible = (n == name) end end
+    local function createTabBtn(name, pos)
+        local b = Instance.new("TextButton", tabContainer)
+        b.Size = UDim2.new(0.25, 0, 1, 0)
+        b.Position = UDim2.new(pos, 0, 0, 0)
+        b.BackgroundTransparency = 1
+        b.Text = name
+        b.TextColor3 = Color3.new(1,1,1)
+        b.Font = Enum.Font.SourceSansBold
+        local frame = Instance.new("ScrollingFrame", content)
+        frame.Size = UDim2.new(1, -10, 1, -10)
+        frame.Position = UDim2.new(0, 5, 0, 5)
+        frame.BackgroundTransparency = 1
+        frame.ScrollBarThickness = 4
+        frame.Visible = false
+        tabs[name] = frame
+        local list = Instance.new("UIListLayout", frame)
+        list.Padding = UDim.new(0, 5)
+        list.SortOrder = Enum.SortOrder.LayoutOrder
+        b.MouseButton1Click:Connect(function() switchTab(name) end)
+        return frame
+    end
+
+    local tabMain = createTabBtn("Dash", 0)
+    local tabStats = createTabBtn("Stats", 0.25)
+    local tabBoosters = createTabBtn("Boost", 0.5)
+    local tabSettings = createTabBtn("Cfg", 0.75)
+
+    -- [[ DASHBOARD ]]
+    local startBtn = Instance.new("TextButton", tabMain)
+    startBtn.Size = UDim2.new(1, 0, 0, 40)
+    startBtn.BackgroundColor3 = Color3.fromRGB(40, 180, 40)
+    startBtn.Text = "START FARMING"
+    startBtn.TextColor3 = Color3.new(1,1,1)
+    startBtn.Font = Enum.Font.GothamBold
+    startBtn.LayoutOrder = 1
+
+    local fieldLabel = Instance.new("TextLabel", tabMain)
+    fieldLabel.Size = UDim2.new(1, 0, 0, 20)
+    fieldLabel.Text = "Select Field:"
+    fieldLabel.TextColor3 = Color3.new(0.8,0.8,0.8)
+    fieldLabel.BackgroundTransparency = 1
+    fieldLabel.LayoutOrder = 2
+
+    local fieldScroll = Instance.new("ScrollingFrame", tabMain)
+    fieldScroll.Size = UDim2.new(1, 0, 0, 120)
+    fieldScroll.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    fieldScroll.LayoutOrder = 3
+    local fsLayout = Instance.new("UIListLayout", fieldScroll)
+    
+    for fname, _ in pairs(FieldsData) do
+        local b = Instance.new("TextButton", fieldScroll)
+        b.Size = UDim2.new(1, -10, 0, 25)
+        b.Text = fname
+        b.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+        b.TextColor3 = Color3.new(1,1,1)
+        b.MouseButton1Click:Connect(function()
+            State.CurrentField = fname
+            State.SprinklerPlaced = false
+            fieldLabel.Text = "Current: " .. fname
+        end)
+    end
+    fieldScroll.CanvasSize = UDim2.new(0, 0, 0, 380)
+
+    -- [[ STATS TAB ]]
+    local toggleStatsBtn = Instance.new("TextButton", tabStats)
+    toggleStatsBtn.Size = UDim2.new(1, 0, 0, 30)
+    toggleStatsBtn.Text = "Toggle View: Total Session"
+    toggleStatsBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 100)
+    toggleStatsBtn.TextColor3 = Color3.new(1,1,1)
+    
+    local statLabels = {}
+    local function addStat(id, color, defaultTxt)
+        local l = Instance.new("TextLabel", tabStats)
+        l.Size = UDim2.new(1, 0, 0, 20)
+        l.TextColor3 = color or Color3.new(1,1,1)
+        l.BackgroundTransparency = 1
+        l.TextXAlignment = Enum.TextXAlignment.Left
+        l.Text = defaultTxt or (id..": 0")
+        statLabels[id] = l
+        return l
+    end
+    addStat("HPS", nil, "H/s: 0"); addStat("HPM", nil, "H/m: 0"); addStat("HPH", nil, "H/h: 0")
+    addStat("PPS", Color3.fromRGB(150,255,150), "P/s: 0"); addStat("PPM", Color3.fromRGB(150,255,150), "P/m: 0"); addStat("PPH", Color3.fromRGB(150,255,150), "P/h: 0")
+    addStat("Total", Color3.new(1,0.8,0), "Total: 0"); addStat("Time", nil, "Time: 00:00:00")
+    
+    local mmHeader = Instance.new("TextLabel", tabStats)
+    mmHeader.Size = UDim2.new(1, 0, 0, 25)
+    mmHeader.Text = "-- MM REWARDS --"
+    mmHeader.TextColor3 = Color3.new(1,1,0)
+    mmHeader.BackgroundTransparency = 1
+    local mmRewLabel = Instance.new("TextLabel", tabStats)
+    mmRewLabel.Size = UDim2.new(1, 0, 0, 200)
+    mmRewLabel.TextYAlignment = Enum.TextYAlignment.Top
+    mmRewLabel.TextXAlignment = Enum.TextXAlignment.Left
+    mmRewLabel.BackgroundTransparency = 1
+    mmRewLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+    mmRewLabel.Text = "No rewards yet."
+    statLabels.MM = mmRewLabel
+
+    toggleStatsBtn.MouseButton1Click:Connect(function()
+        showIntervalStats = not showIntervalStats
+        toggleStatsBtn.Text = showIntervalStats and "Toggle View: Interval (Current)" or "Toggle View: Total Session"
+    end)
+
+    -- [[ SETTINGS TAB ]]
+    local scaleBox = Instance.new("TextBox", tabSettings)
+    scaleBox.Size = UDim2.new(1, 0, 0, 30)
+    scaleBox.Text = "UI Scale: 1.0"
+    scaleBox.BackgroundColor3 = Color3.fromRGB(30,30,30)
+    scaleBox.TextColor3 = Color3.new(1,1,1)
+    
+    local balloonTgl = Instance.new("TextButton", tabSettings)
+    balloonTgl.Size = UDim2.new(1, 0, 0, 30)
+    balloonTgl.Text = "Ignore Balloons: OFF"
+    balloonTgl.BackgroundColor3 = Color3.fromRGB(60, 20, 20)
+    balloonTgl.TextColor3 = Color3.new(1,1,1)
+    
+    local balloonTimeBox = Instance.new("TextBox", tabSettings)
+    balloonTimeBox.Size = UDim2.new(1, 0, 0, 30)
+    balloonTimeBox.PlaceholderText = "Ignore for (e.g. 60m, 1h)"
+    balloonTimeBox.Text = ""
+    balloonTimeBox.BackgroundColor3 = Color3.fromRGB(30,30,30)
+    balloonTimeBox.TextColor3 = Color3.new(1,1,1)
+
+    scaleBox.FocusLost:Connect(function()
+        local v = tonumber(scaleBox.Text:match("[%d%.]+"))
+        if v then scaleObj.Scale = math.clamp(v, 0.5, 3) end
+    end)
+    
+    balloonTgl.MouseButton1Click:Connect(function()
+        State.IgnoreBalloonsForever = not State.IgnoreBalloonsForever
+        balloonTgl.Text = "Ignore Balloons: " .. (State.IgnoreBalloonsForever and "ON" or "OFF")
+        balloonTgl.BackgroundColor3 = State.IgnoreBalloonsForever and Color3.fromRGB(20, 60, 20) or Color3.fromRGB(60, 20, 20)
+    end)
+    
+    balloonTimeBox.FocusLost:Connect(function()
+        local txt = balloonTimeBox.Text:lower()
+        local num = tonumber(txt:match("%d+"))
+        if num then
+            local mult = 1
+            if txt:find("h") then mult = 3600 elseif txt:find("m") then mult = 60 end
+            State.BalloonIgnoreUntil = tick() + (num * mult)
+            balloonTimeBox.Text = "Ignoring until: " .. os.date("%X", State.BalloonIgnoreUntil)
+        end
+    end)
+
+    -- [[ BOOSTERS TAB ]]
+    local boosterLabels = {}
+    for bName, _ in pairs(Boosters) do
+        local l = Instance.new("TextLabel", tabBoosters)
+        l.Size = UDim2.new(1, 0, 0, 20)
+        l.Text = bName .. ": Unknown"
+        l.TextColor3 = Color3.new(0.7, 0.7, 0.7)
+        l.BackgroundTransparency = 1
+        l.TextXAlignment = Enum.TextXAlignment.Left
+        boosterLabels[bName] = l
+    end
+
+    -- Logic Hookups
+    startBtn.MouseButton1Click:Connect(function()
+        State.IsFarming = not State.IsFarming
+        startBtn.Text = State.IsFarming and "STOP FARMING" or "START FARMING"
+        startBtn.BackgroundColor3 = State.IsFarming and Color3.fromRGB(180, 40, 40) or Color3.fromRGB(40, 180, 40)
+        
+        if State.IsFarming then
+            if not State.InitialBoosterCheckDone then
+                isCheckingBoosters = true
+            end
+            -- Reset sprinkler state if switching on
+            if State.CurrentField ~= State.LastSprinklerField then State.SprinklerPlaced = false end
+        else
+            killMomentum()
+        end
+    end)
+
+    destroyBtn.MouseButton1Click:Connect(function()
+        _G.Running = false
+        for _, c in pairs(connections) do c:Disconnect() end
+        sg:Destroy()
+    end)
+
+    switchTab("Dash")
+    return statLabels, boosterLabels
+end
+
+UI_Stats, UI_Boosters = UI.Create()
+
+-- [[ ASSET MAP ]]
 local AssetNameCache = {}
 local function getAssetName(id)
     if AssetNameCache[id] then return AssetNameCache[id] end
@@ -262,56 +410,16 @@ local function getAssetName(id)
     return "ID: " .. tostring(id)
 end
 
--- [[ POLLEN TRACKER ]]
+-- [[ THREADS ]]
+
+-- 1. Gross Pollen Tracker
 table.insert(connections, RunService.Heartbeat:Connect(function()
     local cur = LocalPlayer.CoreStats.Pollen.Value
     if cur > lastPollenRaw then totalPollenCollected = totalPollenCollected + (cur - lastPollenRaw) end
     lastPollenRaw = cur
 end))
 
--- [[ DISK ENGINE ]]
-local function updateDisks()
-    local p = workspace:FindFirstChild("Particles"); if not p then return end
-    local n = {}
-    for _, d in ipairs(p:GetChildren()) do
-        if d.Name == "WarningDisk" and d.Size.X <= 8 then
-            if not d:GetAttribute("SpawnTime") then d:SetAttribute("SpawnTime", tick()) end
-            table.insert(n, d)
-        end
-    end
-    table.sort(n, function(a, b) return (1 - a.Transparency) > (1 - b.Transparency) end)
-    warningDisks.queue = n
-end
-
-local function processDisks()
-    if warningDisks.processing or #warningDisks.queue == 0 then return end
-    warningDisks.processing = true
-    task.spawn(function()
-        while #warningDisks.queue > 0 do
-            local d = warningDisks.queue[1]
-            if d and d.Parent then
-                local spawn = d:GetAttribute("SpawnTime") or tick()
-                if d.Transparency > 0.05 then
-                    local wait = 1.6 - (tick() - spawn); if wait > 0 then task.wait(wait) end
-                end
-                if d and d.Parent then
-                    local lootStart, timeout = nil, tick()
-                    while d and d.Parent and (tick() - timeout < 3) do
-                        teleportTo(d.Position + Vector3.new(0, 1, 0))
-                        game:GetService("ReplicatedStorage").Events.ToolCollect:FireServer()
-                        if d.Transparency <= 0.05 and not lootStart then lootStart = tick() end
-                        if lootStart and (tick() - lootStart > 0.14) then break end
-                        RunService.Heartbeat:Wait()
-                    end
-                end
-            end
-            table.remove(warningDisks.queue, 1); updateDisks()
-        end
-        warningDisks.processing = false
-    end)
-end
-
--- [[ BOOSTER CHECKER ]]
+-- 2. Booster Scanner
 local function checkBoosters()
     local btn = LocalPlayer.PlayerGui:WaitForChild("ScreenGui"):WaitForChild("ActivateButton")
     for name, data in pairs(Boosters) do
@@ -322,34 +430,96 @@ local function checkBoosters()
         
         if r == 201 and g == 39 and b == 28 and not cd then 
             boosterPermaIgnore[name] = true
-            UI_Boosters[name].Text = name .. ": Unavail"
-            UI_Boosters[name].TextColor3 = Color3.fromRGB(150,50,50)
+            UI_Boosters[name].Text = name .. ": Unavailable"
+            UI_Boosters[name].TextColor3 = Color3.fromRGB(150, 50, 50)
         elseif cd then 
             UI_Boosters[name].Text = name .. ": " .. txt
-            UI_Boosters[name].TextColor3 = Color3.fromRGB(200,200,0)
+            UI_Boosters[name].TextColor3 = Color3.fromRGB(200, 200, 0)
             task.delay(cd, function() 
                 if not boosterPermaIgnore[name] then 
-                    table.insert(boosterQueue, name)
+                    table.insert(boosterQueue, name) 
                     UI_Boosters[name].Text = name .. ": READY"
-                    UI_Boosters[name].TextColor3 = Color3.fromRGB(50,200,50)
+                    UI_Boosters[name].TextColor3 = Color3.fromRGB(50, 200, 50)
                 end 
             end)
         else 
-            table.insert(boosterQueue, name)
+            table.insert(boosterQueue, name) 
             UI_Boosters[name].Text = name .. ": READY"
-            UI_Boosters[name].TextColor3 = Color3.fromRGB(50,200,50)
+            UI_Boosters[name].TextColor3 = Color3.fromRGB(50, 200, 50)
         end
     end
     isCheckingBoosters = false; State.InitialBoosterCheckDone = true
     teleportTo(FieldsData[State.CurrentField].center)
 end
 
--- [[ MEMORY MATCH SOLVER ]]
+-- 3. Telemetry UI Updater
+task.spawn(function()
+    while _G.Running do
+        task.wait(1)
+        if UI_Stats then
+            local elapsed = math.max(1, tick() - startTime)
+            local h = LocalPlayer.CoreStats.Honey.Value - initialHoney
+            local hps, pps = h/elapsed, totalPollenCollected/elapsed
+            
+            UI_Stats.hS.Text = "H/s: "..formatNumber(hps)
+            UI_Stats.hM.Text = "H/m: "..formatNumber(hps*60)
+            UI_Stats.hH.Text = "H/h: "..formatNumber(hps*3600)
+            UI_Stats.pS.Text = "P/s: "..formatNumber(pps)
+            UI_Stats.pM.Text = "P/m: "..formatNumber(pps*60)
+            UI_Stats.pH.Text = "P/h: "..formatNumber(pps*3600)
+            UI_Stats.total.Text = "Total: "..formatNumber(h)
+            UI_Stats.time.Text = "Time: "..os.date("!%X", elapsed)
+            
+            local mmText = ""
+            for id, count in pairs(State.TotalMMRewards) do
+                mmText = mmText .. getAssetName(id) .. ": " .. count .. "\n"
+            end
+            if mmText == "" then mmText = "No rewards yet." end
+            UI_Stats.MM.Text = mmText
+        end
+    end
+end)
+
+-- 4. Main Background Controller
+task.spawn(function()
+    while _G.Running do
+        task.wait(0.5)
+        if State.IsFarming then
+            if isCheckingBoosters then checkBoosters() end
+            
+            -- Booster Execution
+            if #boosterQueue > 0 and not isConvertingHoney and not activeBooster and not warningDisks.processing and not isSolvingMemoryMatch then
+                activeBooster = true; local b = table.remove(boosterQueue, 1); teleportTo(Boosters[b].pos); task.wait(1.5); pressEKey(); task.wait(0.5)
+                
+                if Boosters[b].isMM then
+                    task.wait(4); ActiveMemoryMatchName = b; isSolvingMemoryMatch = true; lastMMPress = tick()
+                    activeBooster = false; teleportTo(FieldsData[State.CurrentField].center)
+                else
+                    if Boosters[b].collectibles then
+                        local tOut = tick(); repeat task.wait(0.1) until #workspace.Collectibles:GetChildren() > 5 or tick() - tOut > 6
+                        local vacStart = tick()
+                        while tick() - vacStart < 12 do
+                            local nearby = {}
+                            for _, t in ipairs(workspace.Collectibles:GetChildren()) do if (t.Position - Boosters[b].pos).Magnitude < 30 then table.insert(nearby, t) end end
+                            if #nearby == 0 then break end
+                            for _, t in ipairs(nearby) do teleportTo(t.Position); task.wait(0.05) end
+                        end
+                    end
+                    task.delay(Boosters[b].time, function() if not boosterPermaIgnore[b] then table.insert(boosterQueue, b) end end)
+                    task.wait(1.5); activeBooster = false; teleportTo(FieldsData[State.CurrentField].center)
+                end
+            end
+        end
+    end
+end)
+
+-- 5. Memory Match Solver (Invisible)
 task.spawn(function()
     local KnownCards, SolvedSlots, CurrentBoard = {}, {}, nil
     local GlobalOrderCounter = 0
     local CurrentWinnings = {}
     local DefaultBackID = "http://www.roblox.com/asset/?id=3690982763"
+    
     local function getOrderCounter() GlobalOrderCounter = GlobalOrderCounter + 1; return GlobalOrderCounter end
 
     local function sendMMWebhook(gameName, winnings)
@@ -389,7 +559,12 @@ task.spawn(function()
         }
     }
 
-    local function extractCount(text) return text and string.match(text:lower(), "x%d+") or "" end
+    local function extractCount(text)
+        if not text then return "" end
+        local m = string.match(text:lower(), "x%d+")
+        return m or ""
+    end
+
     local function checkCategory(matchType, id, countText)
         local logic = MMLogic[matchType] or MMLogic["Memory Match"]
         local sig = id .. (countText ~= "" and "_" .. countText or "")
@@ -554,56 +729,6 @@ task.spawn(function()
     end
 end)
 
--- [[ MAIN BACKGROUND CONTROLLER ]]
-task.spawn(function()
-    while _G.Running do
-        task.wait(0.5)
-        
-        if State.IsFarming then
-            -- 1. Scan for Boosters
-            if isCheckingBoosters then checkBoosters() end
-            
-            -- 2. Process Queue
-            if #boosterQueue > 0 and not isConvertingHoney and not activeBooster and not warningDisks.processing and not isSolvingMemoryMatch then
-                activeBooster = true; local b = table.remove(boosterQueue, 1)
-                teleportTo(Boosters[b].pos); task.wait(1.5); pressEKey(); task.wait(0.5)
-                
-                if Boosters[b].isMM then
-                    task.wait(4); ActiveMemoryMatchName = b; isSolvingMemoryMatch = true; lastMMPress = tick()
-                    task.delay(Boosters[b].time, function() if not boosterPermaIgnore[b] then table.insert(boosterQueue, b) end end)
-                    activeBooster = false; teleportTo(FieldsData[State.CurrentField].center)
-                else
-                    if Boosters[b].collectibles then
-                        local tOut = tick(); repeat task.wait(0.1) until #workspace.Collectibles:GetChildren() > 5 or tick() - tOut > 6
-                        local vacStart = tick()
-                        while tick() - vacStart < 12 do
-                            local nearby = {}
-                            for _, t in ipairs(workspace.Collectibles:GetChildren()) do if (t.Position - Boosters[b].pos).Magnitude < 30 then table.insert(nearby, t) end end
-                            if #nearby == 0 then break end
-                            for _, t in ipairs(nearby) do teleportTo(t.Position); task.wait(0.05) end
-                        end
-                    end
-                    task.delay(Boosters[b].time, function() if not boosterPermaIgnore[b] then table.insert(boosterQueue, b) end end)
-                    task.wait(1.5); activeBooster = false; teleportTo(FieldsData[State.CurrentField].center)
-                end
-            end
-        end
-        
-        -- 3. Update UI
-        if UI_Stats then
-            local elapsed = math.max(1, tick() - startTime)
-            local h = LocalPlayer.CoreStats.Honey.Value - initialHoney
-            local hps, pps = h/elapsed, totalPollenCollected/elapsed
-            UI_Stats.hS.Text = "H/s: "..formatNumber(hps); UI_Stats.hM.Text = "H/m: "..formatNumber(hps*60); UI_Stats.hH.Text = "H/h: "..formatNumber(hps*3600)
-            UI_Stats.pS.Text = "P/s: "..formatNumber(pps); UI_Stats.pM.Text = "P/m: "..formatNumber(pps*60); UI_Stats.pH.Text = "P/h: "..formatNumber(pps*3600)
-            UI_Stats.total.Text = "Total: "..formatNumber(h); UI_Stats.time.Text = "Time: "..os.date("!%X", elapsed)
-            local mmText = ""
-            for id, count in pairs(State.TotalMMRewards) do mmText = mmText .. getAssetName(id) .. ": " .. count .. "\n" end
-            UI_Stats.MM.Text = mmText ~= "" and mmText or "No rewards yet."
-        end
-    end
-end)
-
 -- [[ MAIN LOOPS ]]
 table.insert(connections, RunService.RenderStepped:Connect(function()
     if not _G.Running or not State.IsFarming then return end
@@ -715,4 +840,4 @@ end))
 
 -- Anti-Idle
 table.insert(connections, LocalPlayer.Idled:Connect(function() VUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame); task.wait(1); VUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame) end))
-print("✅ BSS V17: Full Release Loaded.")
+print("✅ BSS V18: Fixed Order & Stats Loaded.")
