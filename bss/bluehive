@@ -67,6 +67,7 @@ if game:IsLoaded() then
 end
 -------
 end)
+
 -- =============================================================================
 -- [[ 1. CONSTANTS & DATA ]]
 -- =============================================================================
@@ -518,18 +519,27 @@ local function createUI()
                     for name, data in pairs(Boosters) do
                         if boosterPermaIgnore[name] then continue end
                         teleportTo(data.pos); task.wait(1.8)
+                        -- Cancel movement after teleport during scan too
+                        local _sc = LocalPlayer.Character
+                        local _sh = _sc and _sc:FindFirstChild("Humanoid")
+                        local _sr = _sc and _sc:FindFirstChild("HumanoidRootPart")
+                        if _sh and _sr then _sh:MoveTo(_sr.Position) end
                         local bg, txt = btn2.BackgroundColor3, btn2.TextBox.Text
-                        local cd = parseCooldown(txt)
+                        local cd = parseCooldown(txt)  -- works on "Spend ... (x:xx:xx)" too
                         local r,g,b2 = math.round(bg.R*255), math.round(bg.G*255), math.round(bg.B*255)
-                        if r==201 and g==39 and b2==28 and not cd then
+                        -- "Spend X honey" text means cost-gated (not on time cooldown) — treat as unavailable for now
+                        local isSpendGated = txt:lower():find("spend") ~= nil and not cd
+                        if (r==201 and g==39 and b2==28 and not cd) or isSpendGated then
                             boosterPermaIgnore[name] = true
                             if boosterUILabels[name] then
                                 boosterUILabels[name].Text = "  "..name..":  [Unavailable]"
                                 boosterUILabels[name].TextColor3 = Color3.fromRGB(120,60,60)
                             end
                         elseif cd then
+                            -- Show clean time, not the full raw button text
+                            local timeStr = string.format("%dh %dm %ds", math.floor(cd/3600), math.floor((cd%3600)/60), cd%60)
                             if boosterUILabels[name] then
-                                boosterUILabels[name].Text = "  "..name..":  ⏳ "..txt
+                                boosterUILabels[name].Text = "  "..name..":  ⏳ "..timeStr
                                 boosterUILabels[name].TextColor3 = Color3.fromRGB(200,180,60)
                             end
                             task.delay(cd, function()
@@ -949,6 +959,13 @@ task.spawn(function()
                             end
                         end
                     end)
+                    -- Update label to show cooldown
+                    local bTime = Boosters[bName].time
+                    local timeStr = string.format("%dh %dm", math.floor(bTime/3600), math.floor((bTime%3600)/60))
+                    if boosterUILabels[bName] then
+                        boosterUILabels[bName].Text = "  "..bName..":  ⏳ "..timeStr
+                        boosterUILabels[bName].TextColor3 = Color3.fromRGB(200,180,60)
+                    end
                 end
                 ActiveMemoryMatchName = nil
                 CurrentWinnings = {}
@@ -1085,17 +1102,72 @@ task.spawn(function()
             activeBooster = true
             local b = table.remove(boosterQueue, 1)
             if boosterUILabels[b] then
-                boosterUILabels[b].Text = "  "..b..":  🔄 Active"
+                boosterUILabels[b].Text = "  "..b..":  🔄 Claiming"
                 boosterUILabels[b].TextColor3 = Color3.fromRGB(80,180,255)
             end
-            teleportTo(Boosters[b].pos); task.wait(1.5); pressEKey(); task.wait(0.5)
+            teleportTo(Boosters[b].pos); task.wait(1.5)
+            -- Cancel any movement the humanoid queued up after the teleport
+            local _char = LocalPlayer.Character
+            local _hum  = _char and _char:FindFirstChild("Humanoid")
+            local _hrp  = _char and _char:FindFirstChild("HumanoidRootPart")
+            if _hum and _hrp then _hum:MoveTo(_hrp.Position) end
+            pressEKey(); task.wait(0.5)
 
             if Boosters[b].isMM then
-                task.wait(4)
-                ActiveMemoryMatchName = b
-                isSolvingMemoryMatch  = true
-                lastMMPress           = tick()
-                -- timer for re-queue happens inside MM solver after completion
+                -- Verify the board actually opened (no board = claim failed: on cooldown, cost gate, etc.)
+                local boardFound = false
+                local waitStart  = tick()
+                while tick() - waitStart < 6 do
+                    task.wait(0.25)
+                    local sg2 = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui")
+                    local ml  = sg2 and sg2:FindFirstChild("MinigameLayer")
+                    if ml then
+                        for _, child in pairs(ml:GetChildren()) do
+                            if child.Name == "MemoryMatchFrame" then
+                                local lbl = child:FindFirstChild("ChancesFrame") and child.ChancesFrame:FindFirstChild("CountLabel")
+                                if lbl and (tonumber(string.match(lbl.ContentText or "", "%d+")) or 0) >= 1 then
+                                    boardFound = true; break
+                                end
+                            end
+                        end
+                    end
+                    if boardFound then break end
+                end
+
+                if boardFound then
+                    ActiveMemoryMatchName = b
+                    isSolvingMemoryMatch  = true
+                    lastMMPress           = tick()
+                    if boosterUILabels[b] then
+                        boosterUILabels[b].Text = "  "..b..":  🧠 Solving"
+                        boosterUILabels[b].TextColor3 = Color3.fromRGB(180,120,255)
+                    end
+                else
+                    -- Claim failed — re-read button text for accurate cooldown
+                    -- Handles both "x:xx:xx" style AND "Spend X,XXX,XXX honey to play ... (x:xx:xx)" style
+                    local cooldownSecs = Boosters[b].time
+                    local btn2 = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui") and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
+                    if btn2 and btn2:FindFirstChild("TextBox") then
+                        local btnTxt = btn2.TextBox.Text
+                        local cd = parseCooldown(btnTxt)  -- parseCooldown already handles any x:xx:xx anywhere in string
+                        if cd and cd > 0 then cooldownSecs = cd end
+                    end
+                    task.delay(cooldownSecs, function()
+                        if not boosterPermaIgnore[b] then
+                            table.insert(boosterQueue, b)
+                            if boosterUILabels[b] then
+                                boosterUILabels[b].Text = "  "..b..":  ✅ READY"
+                                boosterUILabels[b].TextColor3 = Color3.fromRGB(80,220,80)
+                            end
+                        end
+                    end)
+                    local timeStr = string.format("%dh %dm", math.floor(cooldownSecs/3600), math.floor((cooldownSecs%3600)/60))
+                    if boosterUILabels[b] then
+                        boosterUILabels[b].Text = "  "..b..":  ⏳ "..timeStr.." (skipped)"
+                        boosterUILabels[b].TextColor3 = Color3.fromRGB(200,120,60)
+                    end
+                end
+                -- re-queue on success is handled inside the MM solver thread after board closes
                 activeBooster = false
                 teleportTo(getFieldCenter())
             else
