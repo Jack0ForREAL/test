@@ -15,10 +15,17 @@ local RepStorage = game:GetService("ReplicatedStorage")
 -- [[ CONFIGURATION ]]
 local Webhook_URL = "https://discord.com/api/webhooks/1328668957774839819/5-ooyV3yMEsU46cfNtF9NV8a0kyNA0u2Q4xXxeK5HEroIU5yCwqIcmq-8MM7V0bYGBwI"
 
--- [[ DATA TABLES ]]
+-- Field Data (Center + Bounds)
 local function calcField(v1, v2)
     local center = (v1 + v2) / 2
-    return { center = center, bounds = { x1 = math.min(v1.X, v2.X), x2 = math.max(v1.X, v2.X), z1 = math.min(v1.Z, v2.Z), z2 = math.max(v1.Z, v2.Z), y = center.Y } }
+    return {
+        center = center,
+        bounds = {
+            x1 = math.min(v1.X, v2.X), x2 = math.max(v1.X, v2.X),
+            z1 = math.min(v1.Z, v2.Z), z2 = math.max(v1.Z, v2.Z),
+            y = center.Y
+        }
+    }
 end
 
 local FieldsData = {
@@ -50,17 +57,18 @@ local Boosters = {
     ["Extreme Memory Match"] = { pos = Vector3.new(-403, 111, 545), collectibles = false, time = 28800, isMM = true }
 }
 
--- [[ GLOBAL STATE ]]
+-- [[ GLOBAL VARIABLES ]]
 local State = {
     IsFarming = false,
     CurrentField = "Pine Tree Forest",
     LastSprinklerField = "",
     IgnoreBalloonsForever = false,
     BalloonIgnoreUntil = 0,
-    TotalMMRewards = {}, 
+    TotalMMRewards = {},
     InitialBoosterCheckDone = false
 }
 
+-- Farming Vars
 local warningDisks = { queue = {}, processing = false }
 local crosshairCounter, crosshairBlacklist = 0, {}
 local boosterQueue, boosterPermaIgnore = {}, {}
@@ -72,9 +80,55 @@ local lastHoneyEPress = 0
 local currentTarget, currentTargetType = nil, nil
 local firstAttemptTimes, permaIgnore, verifyingTokens = {}, {}, {}
 
+-- Stats
 local totalPollenCollected, lastPollenRaw = 0, LocalPlayer.CoreStats.Pollen.Value
 local startTime, initialHoney = tick(), LocalPlayer.CoreStats.Honey.Value
 local showIntervalStats = false 
+
+-- CSV Vars
+local statsBuffer, tilesBuffer = {}, {}
+local lastSaveTime = tick()
+local SAVE_INTERVAL = 15
+local tilesFilename = "Tiles.txt"
+
+-- [[ UTILITIES ]]
+local function formatNumber(n) return tostring(math.floor(n)):reverse():gsub("%d%d%d", "%1,"):reverse():gsub("^,", "") end
+local function killMomentum() local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart"); if hrp then hrp.Velocity, hrp.RotVelocity = Vector3.zero, Vector3.zero end end
+local function teleportTo(pos) local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart"); if hrp then killMomentum(); hrp.CFrame = CFrame.new(pos) end end
+local function pressEKey() VInput:SendKeyEvent(true, Enum.KeyCode.E, false, game); task.wait(0.1); VInput:SendKeyEvent(false, Enum.KeyCode.E, false, game) end
+
+local function isWithinCurrentField(pos)
+    local f = FieldsData[State.CurrentField].bounds
+    return pos.X >= f.x1 and pos.X <= f.x2 and pos.Z >= f.z1 and pos.Z <= f.z2
+end
+
+local function getHivePos()
+    local h = workspace:FindFirstChild("Honeycombs")
+    if not h then return nil end
+    for _, v in ipairs(h:GetChildren()) do 
+        local o = v:FindFirstChild("Display") and v.Display:FindFirstChild("Gui") and v.Display.Gui:FindFirstChild("Frame") and v.Display.Gui.Frame:FindFirstChild("OwnerName")
+        if o and o.Text == LocalPlayer.Name then return v.Display.Position - Vector3.new(0, 25, 7) end 
+    end
+    return nil
+end
+
+local function parseCooldown(txt)
+    local h,m,s = txt:match("(%d+):(%d+):(%d+)"); if h then return tonumber(h)*3600 + tonumber(m)*60 + tonumber(s) end
+    local m2,s2 = txt:match("(%d+):(%d+)"); if m2 then return tonumber(m2)*60 + tonumber(s2) end
+    return nil
+end
+
+local function placeSprinkler()
+    if State.CurrentField ~= State.LastSprinklerField then
+        local center = FieldsData[State.CurrentField].center
+        teleportTo(center)
+        task.wait(0.5)
+        local args = {{Name = "Sprinkler Builder"}}
+        RepStorage.Events.PlayerActivesCommand:FireServer(unpack(args))
+        State.LastSprinklerField = State.CurrentField
+        task.wait(0.5)
+    end
+end
 
 -- [[ LOAD EXTERNAL ]]
 task.spawn(function()
@@ -120,50 +174,10 @@ end
 -------
 end)
 
--- [[ UTILITIES (DEFINED BEFORE UI) ]]
-local function formatNumber(n) return tostring(math.floor(n)):reverse():gsub("%d%d%d", "%1,"):reverse():gsub("^,", "") end
-local function killMomentum() local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart"); if hrp then hrp.Velocity, hrp.RotVelocity = Vector3.zero, Vector3.zero end end
-local function teleportTo(pos) local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart"); if hrp then killMomentum(); hrp.CFrame = CFrame.new(pos) end end
-local function pressEKey() VInput:SendKeyEvent(true, Enum.KeyCode.E, false, game); task.wait(0.1); VInput:SendKeyEvent(false, Enum.KeyCode.E, false, game) end
-
-local function isWithinCurrentField(pos)
-    local f = FieldsData[State.CurrentField].bounds
-    return pos.X >= f.x1 and pos.X <= f.x2 and pos.Z >= f.z1 and pos.Z <= f.z2
-end
-
-local function getHivePos()
-    local h = workspace:FindFirstChild("Honeycombs")
-    if not h then return nil end
-    for _, v in ipairs(h:GetChildren()) do 
-        local o = v:FindFirstChild("Display") and v.Display:FindFirstChild("Gui") and v.Display.Gui:FindFirstChild("Frame") and v.Display.Gui.Frame:FindFirstChild("OwnerName")
-        if o and o.Text == LocalPlayer.Name then return v.Display.Position - Vector3.new(0, 25, 7) end 
-    end
-    return nil
-end
-
-local function parseCooldown(txt)
-    local h,m,s = txt:match("(%d+):(%d+):(%d+)"); if h then return tonumber(h)*3600 + tonumber(m)*60 + tonumber(s) end
-    local m2,s2 = txt:match("(%d+):(%d+)"); if m2 then return tonumber(m2)*60 + tonumber(s2) end
-    return nil
-end
-
-local function placeSprinkler()
-    if State.CurrentField ~= State.LastSprinklerField then
-        local center = FieldsData[State.CurrentField].center
-        teleportTo(center)
-        task.wait(0.5)
-        local args = {{Name = "Sprinkler Builder"}}
-        RepStorage.Events.PlayerActivesCommand:FireServer(unpack(args))
-        State.LastSprinklerField = State.CurrentField
-        task.wait(0.5)
-    end
-end
-
--- [[ UI LIBRARY ]]
-local UI_Stats, UI_Boosters = nil, {}
+-- [[ UI CREATION ]]
 local function createUI()
     local sg = Instance.new("ScreenGui", LocalPlayer.PlayerGui)
-    sg.Name = "BSS_V17_UI"
+    sg.Name = "BSS_V19_UI"
     sg.ResetOnSpawn = false
 
     local main = Instance.new("Frame", sg)
@@ -186,7 +200,7 @@ local function createUI()
     local title = Instance.new("TextLabel", topbar)
     title.Size = UDim2.new(0.6, 0, 1, 0)
     title.Position = UDim2.new(0.02, 0, 0, 0)
-    title.Text = "BSS MASTER V18"
+    title.Text = "BSS MASTER V19"
     title.TextColor3 = Color3.new(1, 1, 1)
     title.BackgroundTransparency = 1
     title.TextXAlignment = Enum.TextXAlignment.Left
@@ -285,13 +299,13 @@ local function createUI()
     toggleStatsBtn.TextColor3 = Color3.new(1,1,1)
     
     local statLabels = {}
-    local function addStat(id, color, defaultTxt)
+    local function addStat(id, color, def)
         local l = Instance.new("TextLabel", tabStats)
         l.Size = UDim2.new(1, 0, 0, 20)
         l.TextColor3 = color or Color3.new(1,1,1)
         l.BackgroundTransparency = 1
         l.TextXAlignment = Enum.TextXAlignment.Left
-        l.Text = defaultTxt or (id..": 0")
+        l.Text = def or (id .. ": 0")
         statLabels[id] = l
         return l
     end
@@ -380,9 +394,8 @@ local function createUI()
         
         if State.IsFarming then
             if not State.InitialBoosterCheckDone then
-                isCheckingBoosters = true
+                isCheckingBoosters = true -- Trigger map scan
             end
-            -- Reset sprinkler state if switching on
             if State.CurrentField ~= State.LastSprinklerField then State.SprinklerPlaced = false end
         else
             killMomentum()
@@ -399,7 +412,8 @@ local function createUI()
     return statLabels, boosterLabels
 end
 
-UI_Stats, UI_Boosters = UI.Create()
+-- Create UI
+local UI_Stats, UI_Boosters = createUI()
 
 -- [[ ASSET MAP ]]
 local AssetNameCache = {}
@@ -409,6 +423,36 @@ local function getAssetName(id)
     if s then AssetNameCache[id] = r; return r end
     return "ID: " .. tostring(id)
 end
+
+-- [[ CSV LOGGING ]]
+local function generateFilename(base)
+    local date = os.date("*t")
+    return string.format("%s-%d-%d-%d_%d%s.csv", base, date.year, date.month, date.day, date.hour, (date.hour < 12 and "am" or "pm"))
+end
+local statsFile, tilesOutputFile = generateFilename("TelementBSS"), generateFilename("TelementBSSTiles")
+local tilesFilename = "Tiles.txt"
+
+local function flushBuffers()
+    if #statsBuffer > 0 then
+        local data = table.concat(statsBuffer, "\n")
+        if isfile(statsFile) then appendfile(statsFile, "\n" .. data) else writefile(statsFile, "Time,TotalHoney,HPS,Pollen,PPS,Capacity\n" .. data) end
+        statsBuffer = {}
+    end
+    if #tilesBuffer > 0 then
+        local data = table.concat(tilesBuffer, "\n")
+        if isfile(tilesOutputFile) then appendfile(tilesOutputFile, "\n" .. data) else writefile(tilesOutputFile, "Time,TileID,Multiplier,State\n" .. data) end
+        tilesBuffer = {}
+    end
+end
+
+local function loadTileIDs()
+    if not isfile(tilesFilename) then return {} end
+    local ids = {}
+    for line in readfile(tilesFilename):gmatch("%S+") do ids[line] = true end
+    return ids
+end
+local monitoredTiles = loadTileIDs()
+local tileStates = {}
 
 -- [[ THREADS ]]
 
@@ -430,7 +474,7 @@ local function checkBoosters()
         
         if r == 201 and g == 39 and b == 28 and not cd then 
             boosterPermaIgnore[name] = true
-            UI_Boosters[name].Text = name .. ": Unavailable"
+            UI_Boosters[name].Text = name .. ": Unavail"
             UI_Boosters[name].TextColor3 = Color3.fromRGB(150, 50, 50)
         elseif cd then 
             UI_Boosters[name].Text = name .. ": " .. txt
@@ -452,15 +496,22 @@ local function checkBoosters()
     teleportTo(FieldsData[State.CurrentField].center)
 end
 
--- 3. Telemetry UI Updater
+-- 3. Telemetry UI & Background Controller
 task.spawn(function()
     while _G.Running do
         task.wait(1)
+        
+        -- CSV Update
+        local cP, cC = LocalPlayer.CoreStats.Pollen.Value, LocalPlayer.CoreStats.Capacity.Value
+        local elapsed = math.max(1, tick() - startTime)
+        local h = LocalPlayer.CoreStats.Honey.Value - initialHoney
+        local hps, pps = h/elapsed, totalPollenCollected/elapsed
+        
+        table.insert(statsBuffer, string.format("%s,%d,%d,%d,%d,%d", os.date("%H:%M:%S"), LocalPlayer.CoreStats.Honey.Value, hps, cP, pps, cC))
+        if tick() - lastSaveTime >= SAVE_INTERVAL then flushBuffers(); lastSaveTime = tick() end
+
+        -- UI Update
         if UI_Stats then
-            local elapsed = math.max(1, tick() - startTime)
-            local h = LocalPlayer.CoreStats.Honey.Value - initialHoney
-            local hps, pps = h/elapsed, totalPollenCollected/elapsed
-            
             UI_Stats.hS.Text = "H/s: "..formatNumber(hps)
             UI_Stats.hM.Text = "H/m: "..formatNumber(hps*60)
             UI_Stats.hH.Text = "H/h: "..formatNumber(hps*3600)
@@ -474,20 +525,13 @@ task.spawn(function()
             for id, count in pairs(State.TotalMMRewards) do
                 mmText = mmText .. getAssetName(id) .. ": " .. count .. "\n"
             end
-            if mmText == "" then mmText = "No rewards yet." end
-            UI_Stats.MM.Text = mmText
+            UI_Stats.MM.Text = mmText ~= "" and mmText or "No rewards yet."
         end
-    end
-end)
 
--- 4. Main Background Controller
-task.spawn(function()
-    while _G.Running do
-        task.wait(0.5)
+        -- Logic Controller
         if State.IsFarming then
             if isCheckingBoosters then checkBoosters() end
             
-            -- Booster Execution
             if #boosterQueue > 0 and not isConvertingHoney and not activeBooster and not warningDisks.processing and not isSolvingMemoryMatch then
                 activeBooster = true; local b = table.remove(boosterQueue, 1); teleportTo(Boosters[b].pos); task.wait(1.5); pressEKey(); task.wait(0.5)
                 
@@ -513,7 +557,7 @@ task.spawn(function()
     end
 end)
 
--- 5. Memory Match Solver (Invisible)
+-- 4. Memory Match Solver
 task.spawn(function()
     local KnownCards, SolvedSlots, CurrentBoard = {}, {}, nil
     local GlobalOrderCounter = 0
@@ -838,6 +882,28 @@ table.insert(connections, RunService.Heartbeat:Connect(function()
     for t, time in pairs(verifyingTokens) do if not t.Parent or math.abs(t.Orientation.X) > 20 or tick() - time > 1.2 then verifyingTokens[t] = nil end end
 end))
 
+-- [[ TILE MONITOR ]]
+task.spawn(function()
+    while _G.Running do
+        task.wait(0.25)
+        local grid = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui") and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("TileGrid")
+        if grid then
+            local current = {}
+            for _, tile in ipairs(grid:GetChildren()) do
+                if tile.Name == "IconTile" and tile:FindFirstChild("BG") and tile.BG:FindFirstChild("Icon") then
+                    local id = tile.BG.Icon.Image:match("%d+")
+                    if monitoredTiles[id] then
+                        local tid, mult = "T"..id, (tile.BG:FindFirstChild("Text") and tile.BG.Text.ContentText ~= "" and tile.BG.Text.ContentText or "x1")
+                        current[tid] = true
+                        if tileStates[tid] ~= mult then tileStates[tid] = mult; table.insert(tilesBuffer, string.format("%s,%s,%s,Active", os.date("%H:%M:%S"), tid, mult)) end
+                    end
+                end
+            end
+            for tid, _ in pairs(tileStates) do if not current[tid] then tileStates[tid] = nil; table.insert(tilesBuffer, string.format("%s,%s,x0,Removed", os.date("%H:%M:%S"), tid)) end end
+        end
+    end
+end)
+
 -- Anti-Idle
 table.insert(connections, LocalPlayer.Idled:Connect(function() VUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame); task.wait(1); VUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame) end))
-print("✅ BSS V18: Fixed Order & Stats Loaded.")
+print("✅ BSS V19: Fixed UI & Logic Restored.")
