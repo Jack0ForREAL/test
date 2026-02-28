@@ -217,27 +217,27 @@ end
 local function anchor()
     local _, hrp, hum = getChar()
     if hrp then hrp.Anchored = true end
-    if hum then hum.WalkSpeed = 0 end
+    if hum then hum.WalkSpeed = 0; hum.WalkToPoint = hrp and hrp.Position or Vector3.zero end
 end
 
 local function unanchor()
     local _, hrp, hum = getChar()
     if hrp then hrp.Anchored = false end
-    if hum then hum.WalkSpeed = 16 end
+    if hum then hum.WalkSpeed = 16; hum.WalkToPoint = hrp and hrp.Position or Vector3.zero end
 end
 
 -- Move toward a position by directly stepping the CFrame each frame.
--- Pass RunService delta time for frame-rate independent movement.
--- Returns true when within threshold.
-local MOVE_SPEED = 20  -- studs per second
-local function stepToward(hrp, targetPos, dt, threshold)
+-- Walk toward a position using WalkToPoint — natural animation, no pathfinding.
+-- Returns true when within threshold. Call every frame.
+local function stepToward(hrp, hum, targetPos, threshold)
     threshold = threshold or 1.5
     local diff = targetPos - hrp.Position
     diff = Vector3.new(diff.X, 0, diff.Z)
-    local dist = diff.Magnitude
-    if dist <= threshold then return true end
-    local step = math.min(MOVE_SPEED * dt, dist)
-    hrp.CFrame = hrp.CFrame + (diff.Unit * step)
+    if diff.Magnitude <= threshold then
+        hum.WalkToPoint = hrp.Position  -- stop walking
+        return true
+    end
+    hum.WalkToPoint = targetPos
     return false
 end
 
@@ -1269,7 +1269,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
         local tPos = currentTarget.Position
         if currentTargetType=="Crosshair" then
             -- Step toward crosshair
-            local reached = stepToward(hrp, tPos, dt, 3)
+            local reached = stepToward(hrp, hum, tPos, 3)
             if reached then
                 local t0=tick()
                 -- Spin in place collecting for up to 4s — but don't yield here,
@@ -1289,7 +1289,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
             if dir.Magnitude > 0 then
                 local dest = tPos + dir.Unit * 4
                 local clamped = Vector3.new(math.clamp(dest.X,b.x1,b.x2), hrp.Position.Y, math.clamp(dest.Z,b.z1,b.z2))
-                local reached = stepToward(hrp, clamped, dt, 2.5)
+                local reached = stepToward(hrp, hum, clamped, 2.5)
                 if reached or (hrp.Position-tPos).Magnitude<1.5 then
                     verifyingTokens[currentTarget]=tick(); currentTarget=nil
                 end
@@ -1304,7 +1304,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
             wanderPos  = Vector3.new(math.random(ix1,ix2), hrp.Position.Y, math.random(iz1,iz2))
             wanderTime = tick()
         end
-        stepToward(hrp, wanderPos, dt, 5)
+        stepToward(hrp, hum, wanderPos, 5)
     end
 end))
 
