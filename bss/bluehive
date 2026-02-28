@@ -123,6 +123,18 @@ local lastInField        = tick()
 local targetStuds        = 0   -- studs travelled toward current token target
 local lastHRPPos         = nil -- previous frame position for delta calculation
 
+-- Blooms & Petals
+-- Priority in res: 0=VIP collectible, 1=Crosshair, 2=Petal, 3=Bloom, 4=Normal token
+-- Disks are handled before res entirely (warnDisks early return)
+local collectBlooms      = true  -- toggle from UI
+local collectedPetals    = {}    -- petals walked through — never retry
+local knownBloomPos      = {}    -- bloom instance -> XZ position (for petal catch after bloom despawns)
+
+-- Blooms & Petals
+local collectBlooms      = true   -- toggle from UI
+local collectedPetals    = {}     -- petals we've already walked through — never retry
+local knownBloomPos      = {}     -- bloom instance -> its last known XZ position (for petal fallback after bloom gone)
+
 -- Stats
 local totalPollen        = 0
 local lastPollenRaw      = LocalPlayer.CoreStats.Pollen.Value
@@ -462,14 +474,22 @@ local function createUI()
     balloonTimeBox.LayoutOrder=4
     local balloonStatusLbl = lbl(cfgTab,"  Timed ignore: inactive",Color3.fromRGB(120,180,120),5)
     div(cfgTab,6)
-    lbl(cfgTab,"  ── UI Scale ──",Color3.fromRGB(200,200,255),7)
+    lbl(cfgTab,"  ── Blooms & Petals ──",Color3.fromRGB(200,200,255),7)
+    local bloomBtn = btn(cfgTab,"Collect Blooms & Petals: ON",Color3.fromRGB(30,80,30),8)
+    div(cfgTab,9)
+    lbl(cfgTab,"  ── UI Scale ──",Color3.fromRGB(200,200,255),10)
     local scaleBox = Instance.new("TextBox", cfgTab)
     scaleBox.Size=UDim2.new(1,-6,0,26); scaleBox.BackgroundColor3=Color3.fromRGB(22,22,30)
     scaleBox.Text="1.0"; scaleBox.PlaceholderText="Scale (0.4–2.5)"
     scaleBox.TextColor3=Color3.fromRGB(200,200,220); scaleBox.Font=Enum.Font.Code
-    scaleBox.TextSize=12; scaleBox.BorderSizePixel=0; scaleBox.LayoutOrder=8
+    scaleBox.TextSize=12; scaleBox.BorderSizePixel=0; scaleBox.LayoutOrder=11
 
     -- Wiring
+    bloomBtn.MouseButton1Click:Connect(function()
+        collectBlooms = not collectBlooms
+        bloomBtn.Text = collectBlooms and "Collect Blooms & Petals: ON" or "Collect Blooms & Petals: OFF"
+        bloomBtn.BackgroundColor3 = collectBlooms and Color3.fromRGB(30,80,30) or Color3.fromRGB(80,30,30)
+    end)
     balloonForeverBtn.MouseButton1Click:Connect(function()
         ignoreBalloonever = not ignoreBalloonever
         balloonForeverBtn.Text = ignoreBalloonever and "Ignore Balloon: ON (skip it)" or "Ignore Balloon: OFF (claim it)"
@@ -1196,36 +1216,96 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
         if waitingForBees then waitingForBees=false; lastEmptied=tick() end
     end
 
-    -- Warning disks take priority
-    if #warnDisks.queue>0 or warnDisks.processing then runDisks(); return end
+    -- Disks take absolute priority (handled before res, early return above)
 
     -- Collect remote call every frame
     RepStorage.Events.ToolCollect:FireServer()
 
-    -- Build target list — skip anything already being verified (assumed collected)
-    local res={}
+    local b = fieldBounds()
+
+    -- Build target list
+    -- Priority: 0=VIP collectible, 1=Crosshair, 2=Petal, 3=Bloom, 4=Normal token
+    -- Disks are handled before this entirely via warnDisks
+    local res = {}
+
+    -- Collectibles: VIP (pri 0) and normal (pri 4)
     for _,p in ipairs(workspace.Collectibles:GetChildren()) do
         if p:IsA("Part") and not verifyingTokens[p] and not permaIgnore[p] then
-            if math.abs(p.Position.Y-hrp.Position.Y)>5 then permaIgnore[p]=true; continue end
-            if firstAttemptTimes[p] and tick()-firstAttemptTimes[p]>8 then permaIgnore[p]=true; continue end
+            if math.abs(p.Position.Y - hrp.Position.Y) > 5 then permaIgnore[p]=true; continue end
+            if firstAttemptTimes[p] and tick()-firstAttemptTimes[p] > 8 then permaIgnore[p]=true; continue end
             if inField(p.Position) then
-                -- ID 3690982763 is a high-value collectible — prioritise over crosshairs
-                local img = p:FindFirstChildWhichIsA("Decal") or p:FindFirstChildWhichIsA("SpecialMesh")
-                local isVIP = p.Name == "3690982763" or (img and tostring(img.Texture):find("3690982763"))
-                table.insert(res,{part=p, pri=isVIP and 0 or 4, typ="Token"})
+                local img   = p:FindFirstChildWhichIsA("Decal") or p:FindFirstChildWhichIsA("SpecialMesh")
+                local isVIP = p.Name=="3690982763" or (img and tostring(img.Texture):find("3690982763"))
+                table.insert(res, {part=p, pri=isVIP and 0 or 4, typ="Token"})
             end
         end
     end
+
+    -- Crosshairs (pri 1)
     for _,p in ipairs(workspace.Particles:GetChildren()) do
         if p.Name=="Crosshair" and not crosshairBlacklist[p] and inField(p.Position) then
             crosshairSeen[p] = (crosshairSeen[p] or 0) + 1
-            if crosshairSeen[p] >= 3 then crosshairBlacklist[p]=true
-            else table.insert(res,{part=p,pri=1,typ="Crosshair"}) end
+            if crosshairSeen[p] >= 3 then crosshairBlacklist[p] = true
+            else table.insert(res, {part=p, pri=1, typ="Crosshair"}) end
         end
     end
-    table.sort(res,function(a,b) return a.pri<b.pri end)
 
-    -- Pick target — only switch if current is gone, in verifying, or we have a higher-priority item
+    if collectBlooms then
+        -- Petals (pri 2): Y ignored — big hitbox, collect on XZ proximity only
+        -- Never retry once collected
+        for _,p in ipairs(workspace.Particles:GetChildren()) do
+            if p.Name=="PetalPart" and not collectedPetals[p] then
+                local xzOk = p.Position.X>=b.x1 and p.Position.X<=b.x2
+                          and p.Position.Z>=b.z1 and p.Position.Z<=b.z2
+                if xzOk then
+                    table.insert(res, {part=p, pri=2, typ="Petal"})
+                end
+            end
+        end
+
+        -- Blooms (pri 3): walk near them so bees farm them
+        local happenings = workspace:FindFirstChild("Happenings")
+        local poppable   = happenings and happenings:FindFirstChild("PoppablePlants")
+        if poppable then
+            for _,bloom in ipairs(poppable:GetChildren()) do
+                if bloom.Name == "Bloom" then
+                    local bPart = bloom:FindFirstChildWhichIsA("BasePart") or (bloom:IsA("BasePart") and bloom)
+                    local bPos  = bPart and bPart.Position
+                    if bPos and inField(bPos) then
+                        knownBloomPos[bloom] = Vector3.new(bPos.X, bPos.Y, bPos.Z)
+                        table.insert(res, {part=bloom, pri=3, typ="Bloom"})
+                    end
+                end
+            end
+        end
+
+        -- Stale bloom cleanup
+        for bloom in pairs(knownBloomPos) do
+            if not bloom.Parent then knownBloomPos[bloom] = nil end
+        end
+    end
+
+    -- Cleanup collectedPetals of gone instances
+    for p in pairs(collectedPetals) do
+        if not p.Parent then collectedPetals[p] = nil end
+    end
+
+    table.sort(res, function(a,b2) return a.pri < b2.pri end)
+
+    -- Current target priority — VIP tokens stored as typ="Token" but pri 0, track via firstAttemptTimes key
+    -- Simpler: just look up the current target's actual pri from res if it's still in there
+    local currentPri = 99
+    if currentTarget then
+        for _,entry in ipairs(res) do
+            if entry.part == currentTarget then currentPri = entry.pri; break end
+        end
+        -- If not in res (e.g. being verified), assign by type
+        if currentPri == 99 then
+            currentPri = ({Token=4, Bloom=3, Petal=2, Crosshair=1})[currentTargetType] or 99
+        end
+    end
+
+    -- Pick / switch target
     if not currentTarget or verifyingTokens[currentTarget] or not currentTarget.Parent then
         currentTarget     = res[1] and res[1].part or nil
         currentTargetType = res[1] and res[1].typ  or nil
@@ -1233,8 +1313,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
         if currentTarget and not firstAttemptTimes[currentTarget] then
             firstAttemptTimes[currentTarget] = tick()
         end
-    elseif res[1] and res[1].pri < (currentTargetType=="Crosshair" and 1 or 4) then
-        -- Higher priority item appeared — switch
+    elseif res[1] and res[1].pri < currentPri then
         currentTarget     = res[1].part
         currentTargetType = res[1].typ
         targetStuds       = 0
@@ -1243,64 +1322,85 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
         end
     end
 
-    -- Move toward target using direct CFrame stepping (no pathfinding/MoveTo)
-    local b = fieldBounds()
+    -- Movement
     if currentTarget then
         local tPos = currentTarget.Position
-        if currentTargetType=="Crosshair" then
-            -- Step toward crosshair
+
+        if currentTargetType == "Crosshair" then
             local reached = stepToward(hrp, hum, tPos, 3)
             if reached then
-                local t0=tick()
-                -- Spin in place collecting for up to 4s — but don't yield here,
-                -- just set a flag and handle via a spawned task
+                local t0 = tick()
                 task.spawn(function()
-                    while currentTarget and currentTarget.Parent and tick()-t0<4 do
+                    while currentTarget and currentTarget.Parent and tick()-t0 < 4 do
                         RepStorage.Events.ToolCollect:FireServer()
                         task.wait(0.05)
                     end
                 end)
-                crosshairBlacklist[currentTarget]=true; currentTarget=nil
-            end
-        else
-            -- Token: walk toward it.
-            local distToToken  = (hrp.Position - tPos).Magnitude
-            local timeOnTarget = tick() - (firstAttemptTimes[currentTarget] or tick())
+                crosshairBlacklist[currentTarget] = true
+                currentTarget = nil
 
-            -- Accumulate studs travelled this frame
-            if lastHRPPos then
-                targetStuds = targetStuds + (hrp.Position - lastHRPPos).Magnitude
             end
 
-            local dir = (tPos - hrp.Position)
-            dir = Vector3.new(dir.X, 0, dir.Z)
+        elseif currentTargetType == "Petal" then
+            -- Y ignored — walk on XZ only, small overshoot
+            local xzDist   = Vector2.new(hrp.Position.X-tPos.X, hrp.Position.Z-tPos.Z).Magnitude
+            local timeOn   = tick() - (firstAttemptTimes[currentTarget] or tick())
+            if lastHRPPos then targetStuds = targetStuds + (hrp.Position - lastHRPPos).Magnitude end
+
+            local dir = Vector3.new(tPos.X - hrp.Position.X, 0, tPos.Z - hrp.Position.Z)
             if dir.Magnitude > 0 then
-                -- Walk through the token by aiming 6 studs past it.
-                -- Set WalkToPoint every frame — it can get reset by the engine between frames.
-                -- Walking is required (not tpTo) so boot passives collect pollen.
+                hum.WalkToPoint = Vector3.new(tPos.X, hrp.Position.Y, tPos.Z) + dir.Unit * 3
+            end
+
+            if xzDist < 8 or targetStuds > xzDist + 5 or timeOn > 3 then
+                collectedPetals[currentTarget] = true
+                currentTarget = nil; targetStuds = 0
+            end
+
+        elseif currentTargetType == "Bloom" then
+            -- Wander within 40 studs of bloom center so bees can farm it
+            if not currentTarget.Parent then
+                -- Bloom gone — switch target, petal scan will pick up any petals
+                currentTarget = nil; targetStuds = 0
+            else
+                local bCenter = knownBloomPos[currentTarget] or tPos
+                local needNewWander = not wanderPos
+                    or (hrp.Position - wanderPos).Magnitude < 5
+                    or tick() - wanderTime > 6
+                    or Vector2.new(wanderPos.X - bCenter.X, wanderPos.Z - bCenter.Z).Magnitude > 40
+                if needNewWander then
+                    local angle  = math.random() * math.pi * 2
+                    local radius = math.random(5, 35)
+                    local wx = math.clamp(bCenter.X + math.cos(angle)*radius, b.x1, b.x2)
+                    local wz = math.clamp(bCenter.Z + math.sin(angle)*radius, b.z1, b.z2)
+                    wanderPos  = Vector3.new(wx, hrp.Position.Y, wz)
+                    wanderTime = tick()
+                end
+                stepToward(hrp, hum, wanderPos, 5)
+            end
+
+        else
+            -- Token: walk through it
+            local distToToken = (hrp.Position - tPos).Magnitude
+            local timeOn      = tick() - (firstAttemptTimes[currentTarget] or tick())
+            if lastHRPPos then targetStuds = targetStuds + (hrp.Position - lastHRPPos).Magnitude end
+
+            local dir = Vector3.new(tPos.X - hrp.Position.X, 0, tPos.Z - hrp.Position.Z)
+            if dir.Magnitude > 0 then
                 hum.WalkToPoint = tPos + dir.Unit * 6
             end
 
-            -- Assume collected:
-            -- 1. Close enough — threshold high because at 80-120 studs/s you blast past it
-            -- 2. Travelled more studs than token distance (confirmed walked through it)
-            -- 3. 3 second fallback
-            local closeEnough     = distToToken < 12
-            local travelledEnough = targetStuds > distToToken + 10
-            local timedOut        = timeOnTarget > 3
-
-            if closeEnough or travelledEnough or timedOut then
+            if distToToken < 12 or targetStuds > distToToken + 10 or timeOn > 3 then
                 verifyingTokens[currentTarget] = tick()
-                currentTarget = nil
-                targetStuds   = 0
+                currentTarget = nil; targetStuds = 0
             end
         end
+
     else
-        -- Wander: pick new random pos if needed, then step toward it
-        -- Use math.random with integers only — no float bounds
+        -- Wander field
         local ix1,ix2 = math.floor(b.x1), math.ceil(b.x2)
         local iz1,iz2 = math.floor(b.z1), math.ceil(b.z2)
-        if not wanderPos or (hrp.Position-wanderPos).Magnitude<5 or tick()-wanderTime>8 then
+        if not wanderPos or (hrp.Position-wanderPos).Magnitude < 5 or tick()-wanderTime > 8 then
             wanderPos  = Vector3.new(math.random(ix1,ix2), hrp.Position.Y, math.random(iz1,iz2))
             wanderTime = tick()
         end
