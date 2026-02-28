@@ -19,6 +19,7 @@ local connections = {}
 -- [[ EXTERNAL LIBS ]]
 task.spawn(function()
     loadstring(game:HttpGet("https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source"))()
+    loadstring(game:HttpGet("https://pastes.io/raw/deleteuseless"))()
 end)
 
 -- ============================================================
@@ -36,16 +37,14 @@ local function calcField(v1, v2)
     }
 end
 
-local Fields = {
-    ["Pine Tree Forest"]  = { center=Vector3.new(-330,70,-190), bounds={x1=-375.75,x2=-284.05,z1=-251.95,z2=-128.05} },
+local Fields = {["Pine Tree Forest"]  = { center=Vector3.new(-330,70,-190), bounds={x1=-375.75,x2=-284.05,z1=-251.95,z2=-128.05} },
     ["Sunflower Field"]   = calcField(Vector3.new(-172.129,3.997,240.270),  Vector3.new(-252.242,3.997,108.677)),
     ["Dandelion Field"]   = calcField(Vector3.new(-103.944,3.997,183.925),  Vector3.new(39.818,3.997,255.512)),
     ["Clover Field"]      = calcField(Vector3.new(104.108,33.498,136.491),  Vector3.new(207.439,33.498,250.944)),
     ["Blue Flower Field"] = calcField(Vector3.new(60.214,3.997,128.230),    Vector3.new(231.783,3.997,64.574)),
     ["Bamboo Field"]      = calcField(Vector3.new(207.705,19.998,-63.421),  Vector3.new(52.312,19.998,7.943)),
     ["Spider Field"]      = calcField(Vector3.new(12.027,19.998,36.113),    Vector3.new(-98.953,19.998,-63.378)),
-    ["Strawberry Field"]  = calcField(Vector3.new(-137.164,19.998,39.613),  Vector3.new(-222.992,19.998,-63.411)),
-    ["Rose Field"]        = calcField(Vector3.new(-267.982,19.480,168.147), Vector3.new(-392.378,19.480,88.540)),
+    ["Strawberry Field"]  = calcField(Vector3.new(-137.164,19.998,39.613),  Vector3.new(-222.992,19.998,-63.411)),["Rose Field"]        = calcField(Vector3.new(-267.982,19.480,168.147), Vector3.new(-392.378,19.480,88.540)),
     ["Cactus Field"]      = calcField(Vector3.new(-252.308,67.790,-139.652),Vector3.new(-124.002,67.819,-68.288)),
     ["Pumpkin Patch"]     = calcField(Vector3.new(-255.686,67.753,-152.540),Vector3.new(-124.199,67.425,-219.453)),
     ["Mountain Top"]      = calcField(Vector3.new(28.013,175.982,-111.858), Vector3.new(123.606,175.924,-223.915)),
@@ -57,15 +56,12 @@ local FieldOrder = {
     "Rose Field","Cactus Field","Pumpkin Patch","Mountain Top","Pineapple Patch"
 }
 
-local Boosters = {
-    ["Blue Field Booster"]  = { pos=Vector3.new(272,59,84),      collectibles=false, time=2700  },
+local Boosters = {["Blue Field Booster"]  = { pos=Vector3.new(272,59,84),      collectibles=false, time=2700  },
     ["Wealth Clock"]        = { pos=Vector3.new(330,50,191),     collectibles=false, time=3600  },
-    ["Stockings"]           = { pos=Vector3.new(232,38,232),     collectibles=true,  time=3600  },
-    ["Onett"]               = { pos=Vector3.new(34,236,-512),    collectibles=true,  time=28800 },
+    ["Stockings"]           = { pos=Vector3.new(232,38,232),     collectibles=true,  time=3600  },["Onett"]               = { pos=Vector3.new(34,236,-512),    collectibles=true,  time=28800 },
     ["Glue Dispenser"]      = { pos=Vector3.new(270,25258,-722), collectibles=false, time=79200 },
     ["Gingerbread House"]   = { pos=Vector3.new(-201,6,96),      collectibles=false, time=7200  },
-    ["Memory Match"]        = { pos=Vector3.new(137,69,-95),     collectibles=false, time=7200,  isMM=true },
-    ["Mega Memory Match"]   = { pos=Vector3.new(-428,70,-53),    collectibles=false, time=14400, isMM=true },
+    ["Memory Match"]        = { pos=Vector3.new(137,69,-95),     collectibles=false, time=7200,  isMM=true },["Mega Memory Match"]   = { pos=Vector3.new(-428,70,-53),    collectibles=false, time=14400, isMM=true },
     ["Night Memory Match"]  = { pos=Vector3.new(-17,312,-270),   collectibles=false, time=28800, isMM=true },
     ["Extreme Memory Match"]= { pos=Vector3.new(-403,111,545),   collectibles=false, time=28800, isMM=true },
 }
@@ -114,7 +110,7 @@ local permaIgnore        = {}
 local firstAttemptTimes  = {}
 local verifyingTokens    = {}
 local crosshairBlacklist = {}
-local crosshairSeen = {}  -- tracks how many times each crosshair has been a candidate
+local crosshairSeen      = {}  -- tracks how many times each crosshair has been a candidate
 local currentTarget      = nil
 local currentTargetType  = nil
 local wanderPos          = nil
@@ -124,16 +120,9 @@ local targetStuds        = 0   -- studs travelled toward current token target
 local lastHRPPos         = nil -- previous frame position for delta calculation
 
 -- Blooms & Petals
--- Priority in res: 0=VIP collectible, 1=Crosshair, 2=Petal, 3=Bloom, 4=Normal token
--- Disks are handled before res entirely (warnDisks early return)
-local collectBlooms      = true  -- toggle from UI
-local collectedPetals    = {}    -- petals walked through — never retry
-local knownBloomPos      = {}    -- bloom instance -> XZ position (for petal catch after bloom despawns)
-
--- Blooms & Petals
 local collectBlooms      = true   -- toggle from UI
-local collectedPetals    = {}     -- petals we've already walked through — never retry
-local knownBloomPos      = {}     -- bloom instance -> its last known XZ position (for petal fallback after bloom gone)
+local collectedPetals    = {}     -- petals we've walked through -> stores tick()
+local knownBloomPos      = {}     -- bloom instance -> its last known XZ position (safe location)
 
 -- Stats
 local totalPollen        = 0
@@ -635,8 +624,7 @@ task.spawn(function()
     local MMLogic = {
         ["Memory Match"]        = { Ignore={["2028574353"]=true,["1471882621"]=true,["2863122826"]=true,["8277901755"]=true}, ListA={["1674871631_x5"]=true,["2529092020"]=true,["2863468407"]=true,["2584584968"]=true,["2545746569"]=true}, ListB={["2504978518"]=true} },
         ["Mega Memory Match"]   = { Ignore={["2028574353"]=true,["1471882621"]=true,["2863122826"]=true,["8277901755"]=true,["3012679515"]=true,["3030407727"]=true}, ListA={["1674871631_x3"]=true,["2863468407_x3"]=true,["2545746569"]=true,["2584584968"]=true,["2542899798"]=true,["15482935937"]=true}, ListB={["2504978518"]=true,["2319943273"]=true,["1674871631_x10"]=true} },
-        ["Night Memory Match"]  = { Ignore={["2028574353"]=true,["8277901755"]=true,["2863122826"]=true}, ListA={["2504978518"]=true,["2314214749"]=true,["2319943273"]=true}, ListB={["2676671613"]=true,["2028603146"]=true} },
-        ["Extreme Memory Match"]= { Ignore={["2028574353"]=true,["1471882621"]=true,["1838129169"]=true,["8277901755"]=true}, ListA={["2319943273"]=true,["2542899798"]=true,["2542899798_x5"]=true,["3835877932"]=true}, ListB={["1471850677"]=true,["1471849394"]=true,["15529301204"]=true,["2028603146"]=true} },
+        ["Night Memory Match"]  = { Ignore={["2028574353"]=true,["8277901755"]=true,["2863122826"]=true}, ListA={["2504978518"]=true,["2314214749"]=true,["2319943273"]=true}, ListB={["2676671613"]=true,["2028603146"]=true} },["Extreme Memory Match"]= { Ignore={["2028574353"]=true,["1471882621"]=true,["1838129169"]=true,["8277901755"]=true}, ListA={["2319943273"]=true,["2542899798"]=true,["2542899798_x5"]=true,["3835877932"]=true}, ListB={["1471850677"]=true,["1471849394"]=true,["15529301204"]=true,["2028603146"]=true} },
     }
 
     local function extractCount(t) return t and t:lower():match("x%d+") or "" end
@@ -1216,7 +1204,8 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
         if waitingForBees then waitingForBees=false; lastEmptied=tick() end
     end
 
-    -- Disks take absolute priority (handled before res, early return above)
+    -- Warning disks take absolute priority
+    if #warnDisks.queue>0 or warnDisks.processing then runDisks(); return end
 
     -- Collect remote call every frame
     RepStorage.Events.ToolCollect:FireServer()
@@ -1225,7 +1214,6 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
 
     -- Build target list
     -- Priority: 0=VIP collectible, 1=Crosshair, 2=Petal, 3=Bloom, 4=Normal token
-    -- Disks are handled before this entirely via warnDisks
     local res = {}
 
     -- Collectibles: VIP (pri 0) and normal (pri 4)
@@ -1285,9 +1273,9 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
         end
     end
 
-    -- Cleanup collectedPetals of gone instances
-    for p in pairs(collectedPetals) do
-        if not p.Parent then collectedPetals[p] = nil end
+    -- Cleanup collectedPetals of gone/recycled instances (15s expire guarantees it doesn't refind them)
+    for p, tTime in pairs(collectedPetals) do
+        if tick() - tTime > 15 then collectedPetals[p] = nil end
     end
 
     table.sort(res, function(a,b2) return a.pri < b2.pri end)
@@ -1324,7 +1312,19 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
 
     -- Movement
     if currentTarget then
-        local tPos = currentTarget.Position
+        
+        -- Safely extract target position (prevents Bloom 'Model' crash)
+        local tPos
+        if currentTargetType == "Bloom" then
+            tPos = knownBloomPos[currentTarget]
+        else
+            tPos = currentTarget.Position
+        end
+        
+        if not tPos then
+            currentTarget = nil
+            return
+        end
 
         if currentTargetType == "Crosshair" then
             local reached = stepToward(hrp, hum, tPos, 3)
@@ -1349,16 +1349,16 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
 
             local dir = Vector3.new(tPos.X - hrp.Position.X, 0, tPos.Z - hrp.Position.Z)
             if dir.Magnitude > 0 then
-                hum.WalkToPoint = Vector3.new(tPos.X, hrp.Position.Y, tPos.Z) + dir.Unit * 3
+                hum.WalkToPoint = Vector3.new(tPos.X, hrp.Position.Y, tPos.Z) + dir.Unit * 5
             end
 
-            if xzDist < 8 or targetStuds > xzDist + 5 or timeOn > 3 then
-                collectedPetals[currentTarget] = true
+            if xzDist < 6 or targetStuds > xzDist + 5 or timeOn > 3 then
+                collectedPetals[currentTarget] = tick()
                 currentTarget = nil; targetStuds = 0
             end
 
         elseif currentTargetType == "Bloom" then
-            -- Wander within 40 studs of bloom center so bees can farm it
+            -- Wander within safe radius of bloom center so bees can farm it
             if not currentTarget.Parent then
                 -- Bloom gone — switch target, petal scan will pick up any petals
                 currentTarget = nil; targetStuds = 0
@@ -1367,10 +1367,10 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
                 local needNewWander = not wanderPos
                     or (hrp.Position - wanderPos).Magnitude < 5
                     or tick() - wanderTime > 6
-                    or Vector2.new(wanderPos.X - bCenter.X, wanderPos.Z - bCenter.Z).Magnitude > 40
+                    or Vector2.new(wanderPos.X - bCenter.X, wanderPos.Z - bCenter.Z).Magnitude > 30
                 if needNewWander then
                     local angle  = math.random() * math.pi * 2
-                    local radius = math.random(5, 35)
+                    local radius = math.random(5, 25)
                     local wx = math.clamp(bCenter.X + math.cos(angle)*radius, b.x1, b.x2)
                     local wz = math.clamp(bCenter.Z + math.sin(angle)*radius, b.z1, b.z2)
                     wanderPos  = Vector3.new(wx, hrp.Position.Y, wz)
