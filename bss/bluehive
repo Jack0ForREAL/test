@@ -1208,7 +1208,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
             if inField(p.Position) then
                 -- ID 3690982763 is a high-value collectible — prioritise over crosshairs
                 local img = p:FindFirstChildWhichIsA("Decal") or p:FindFirstChildWhichIsA("SpecialMesh")
-                local isVIP = p.Name == "3690982763" or (img and tostring(img.TextureId):find("3690982763"))
+                local isVIP = p.Name == "3690982763" or (img and tostring(img.Texture):find("3690982763"))
                 table.insert(res,{part=p, pri=isVIP and 0 or 4, typ="Token"})
             end
         end
