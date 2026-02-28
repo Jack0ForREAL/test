@@ -19,7 +19,6 @@ local connections = {}
 -- [[ EXTERNAL LIBS ]]
 task.spawn(function()
     loadstring(game:HttpGet("https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source"))()
-    loadstring(game:HttpGet("https://pastes.io/raw/deleteuseless"))()
 end)
 
 -- ============================================================
