@@ -185,7 +185,7 @@ end
 
 local function unanchor()
     local _, hrp, hum = getChar()
-    if hum then hum.WalkSpeed = 16; hum.WalkToPoint = hrp and hrp.Position or Vector3.zero end
+    if hum then hum.WalkToPoint = hrp and hrp.Position or Vector3.zero end
 end
 
 -- Move toward a position by directly stepping the CFrame each frame.
@@ -1264,29 +1264,30 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
             end
         else
             -- Token: walk toward it.
-            -- Accumulate studs travelled this frame toward the token
+            local distToToken  = (hrp.Position - tPos).Magnitude
+            local timeOnTarget = tick() - (firstAttemptTimes[currentTarget] or tick())
+
+            -- Accumulate studs travelled this frame
             if lastHRPPos then
                 targetStuds = targetStuds + (hrp.Position - lastHRPPos).Magnitude
             end
 
-            local distToToken = (hrp.Position - tPos).Magnitude
-            local timeOnTarget = tick() - (firstAttemptTimes[currentTarget] or tick())
-
             local dir = (tPos - hrp.Position)
             dir = Vector3.new(dir.X, 0, dir.Z)
             if dir.Magnitude > 0 then
-                local dest = tPos + dir.Unit * 4
-                local clamped = Vector3.new(math.clamp(dest.X,b.x1,b.x2), hrp.Position.Y, math.clamp(dest.Z,b.z1,b.z2))
-                stepToward(hrp, hum, clamped, 2.5)
+                -- Walk through the token by aiming 6 studs past it.
+                -- Set WalkToPoint every frame — it can get reset by the engine between frames.
+                -- Walking is required (not tpTo) so boot passives collect pollen.
+                hum.WalkToPoint = tPos + dir.Unit * 6
             end
 
-            -- Assume collected if any condition met:
-            -- 1. Close enough (walked up to it)
-            -- 2. Travelled enough studs toward it (walked past/through it)
+            -- Assume collected:
+            -- 1. Close enough — threshold high because at 80-120 studs/s you blast past it
+            -- 2. Travelled more studs than token distance (confirmed walked through it)
             -- 3. 3 second fallback
-            local closeEnough    = distToToken < 2.5
-            local travelledEnough = targetStuds > distToToken + 4  -- walked further than token distance + margin
-            local timedOut       = timeOnTarget > 3
+            local closeEnough     = distToToken < 12
+            local travelledEnough = targetStuds > distToToken + 10
+            local timedOut        = timeOnTarget > 3
 
             if closeEnough or travelledEnough or timedOut then
                 verifyingTokens[currentTarget] = tick()
