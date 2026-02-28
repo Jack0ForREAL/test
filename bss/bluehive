@@ -180,13 +180,11 @@ end
 
 local function anchor()
     local _, hrp, hum = getChar()
-    if hrp then hrp.Anchored = true end
     if hum then hum.WalkSpeed = 0; hum.WalkToPoint = hrp and hrp.Position or Vector3.zero end
 end
 
 local function unanchor()
     local _, hrp, hum = getChar()
-    if hrp then hrp.Anchored = false end
     if hum then hum.WalkSpeed = 16; hum.WalkToPoint = hrp and hrp.Position or Vector3.zero end
 end
 
@@ -1146,6 +1144,11 @@ table.insert(connections, RunService.Heartbeat:Connect(function()
     if not isFarming then return end
     local _,hrp = getChar()
     if not hrp then return end
+
+    -- Zero XZ velocity every frame while at a booster so the character can't drift
+    if activeBooster or isCheckingBoosters then
+        hrp.Velocity = Vector3.new(0, hrp.Velocity.Y, 0)
+    end
 
     -- Out-of-field failsafe (only when freely farming)
     if not isConverting and not isCheckingBoosters and not activeBooster and not isSolvingMM then
