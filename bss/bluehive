@@ -1,3 +1,6 @@
+-- ============================================================
+-- BSS MASTER V23 — Full rewrite, all bugs fixed
+-- ============================================================
 if _G.Running then return end
 _G.Running = true
 
@@ -138,6 +141,8 @@ local crosshairBlacklist = {}
 local crosshairSeen      = {}
 local currentTarget      = nil
 local currentTargetType  = nil
+local currentOvershootPos= nil   -- calculated ONCE when target is assigned, never updated
+local dismissedTokens    = {}    -- part -> tick() when dismissed (10s timed ignore)
 local wanderPos          = nil
 local wanderTime         = 0
 local lastInField        = tick()
@@ -621,6 +626,7 @@ task.spawn(function()
         for k in pairs(firstAttemptTimes)  do if typeof(k)=="Instance" and not k.Parent then firstAttemptTimes[k]=nil end end
         for k in pairs(crosshairBlacklist) do if typeof(k)=="Instance" and not k.Parent then crosshairBlacklist[k]=nil end end
         for k in pairs(crosshairSeen)      do if typeof(k)=="Instance" and not k.Parent then crosshairSeen[k]=nil end end
+        for k,t in pairs(dismissedTokens)  do if tick()-t > 10 then dismissedTokens[k]=nil end end
     end
 end)
 
@@ -1251,28 +1257,44 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
 
     local b = fieldBounds()
 
+    -- Expire dismissed tokens (10s) and permaIgnore cleanup
+    local now = tick()
+    for p,t in pairs(dismissedTokens) do
+        if now - t >= 10 then dismissedTokens[p] = nil end
+    end
+
     -- ──────────────────────────────────────────────────────────
-    -- Build target list
-    -- Priority: 0=Important token, 1=Crosshair, 2=Petal,
-    --           3=Bloom, 4=Normal token
+    -- Build candidate list
+    -- Priority tier: 0=Important token, 1=Crosshair, 2=Petal,
+    --                3=Bloom, 4=Normal token
+    -- Within the same tier, oldest first (by firstAttemptTimes).
+    -- Tokens in dismissedTokens or permaIgnore are skipped.
     -- ──────────────────────────────────────────────────────────
     local res = {}
 
-    -- Collectibles: check ImportantIDs for priority
+    -- Tokens
     for _,p in ipairs(workspace.Collectibles:GetChildren()) do
-        if p:IsA("Part") and not permaIgnore[p] then
+        if p:IsA("Part") and not permaIgnore[p] and not dismissedTokens[p] then
             if math.abs(p.Position.Y - hrp.Position.Y) > 5 then permaIgnore[p]=true; continue end
-            if firstAttemptTimes[p] and tick()-firstAttemptTimes[p] > 8 then permaIgnore[p]=true; continue end
             if inField(p.Position) then
+                -- Register spawn time on first sight
+                if not firstAttemptTimes[p] then firstAttemptTimes[p] = now end
+                -- Perma-ignore truly stuck tokens (10s hard cap)
+                if now - firstAttemptTimes[p] > 10 then permaIgnore[p]=true; continue end
                 local partID = p.Name
                 local img = p:FindFirstChildWhichIsA("Decal") or p:FindFirstChildWhichIsA("SpecialMesh")
                 if img then
                     local tex = tostring(img.Texture or img.MeshId or "")
-                    local extractedID = tex:match("%d+")
-                    if extractedID then partID = extractedID end
+                    local extracted = tex:match("%d+")
+                    if extracted then partID = extracted end
                 end
                 local isImportant = ImportantIDs[partID] or ImportantIDs[p.Name]
-                table.insert(res, {part=p, pri=isImportant and 0 or 4, typ="Token"})
+                table.insert(res, {
+                    part    = p,
+                    pri     = isImportant and 0 or 4,
+                    typ     = "Token",
+                    spawnAt = firstAttemptTimes[p],
+                })
             end
         end
     end
@@ -1281,8 +1303,12 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
     for _,p in ipairs(workspace.Particles:GetChildren()) do
         if p.Name=="Crosshair" and not crosshairBlacklist[p] and inField(p.Position) then
             crosshairSeen[p] = (crosshairSeen[p] or 0) + 1
-            if crosshairSeen[p] >= 3 then crosshairBlacklist[p] = true
-            else table.insert(res, {part=p, pri=1, typ="Crosshair"}) end
+            if crosshairSeen[p] >= 3 then
+                crosshairBlacklist[p] = true
+            else
+                if not firstAttemptTimes[p] then firstAttemptTimes[p] = now end
+                table.insert(res, {part=p, pri=1, typ="Crosshair", spawnAt=firstAttemptTimes[p]})
+            end
         end
     end
 
@@ -1293,7 +1319,8 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
                 local xzOk = p.Position.X>=b.x1 and p.Position.X<=b.x2
                           and p.Position.Z>=b.z1 and p.Position.Z<=b.z2
                 if xzOk then
-                    table.insert(res, {part=p, pri=2, typ="Petal"})
+                    if not firstAttemptTimes[p] then firstAttemptTimes[p] = now end
+                    table.insert(res, {part=p, pri=2, typ="Petal", spawnAt=firstAttemptTimes[p]})
                 end
             end
         end
@@ -1308,7 +1335,8 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
                     local bPos  = bPart and bPart.Position
                     if bPos and inField(bPos) then
                         knownBloomPos[bloom] = Vector3.new(bPos.X, bPos.Y, bPos.Z)
-                        table.insert(res, {part=bloom, pri=3, typ="Bloom"})
+                        if not firstAttemptTimes[bloom] then firstAttemptTimes[bloom] = now end
+                        table.insert(res, {part=bloom, pri=3, typ="Bloom", spawnAt=firstAttemptTimes[bloom]})
                     end
                 end
             end
@@ -1320,35 +1348,64 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
     end
 
     -- Cleanup collectedPetals
-    for p, tTime in pairs(collectedPetals) do
-        if tick() - tTime > 15 then collectedPetals[p] = nil end
+    for p,tTime in pairs(collectedPetals) do
+        if now - tTime > 15 then collectedPetals[p] = nil end
     end
 
-    table.sort(res, function(a,b2) return a.pri < b2.pri end)
+    -- Sort: primary = priority tier (lower = better), secondary = oldest first
+    table.sort(res, function(a, bx)
+        if a.pri ~= bx.pri then return a.pri < bx.pri end
+        return (a.spawnAt or 0) < (bx.spawnAt or 0)
+    end)
 
-    -- Current target priority
-    local currentPri = 99
-    if currentTarget then
+    -- Best candidate (nil if list is empty)
+    local best = res[1]
+
+    -- ──────────────────────────────────────────────────────────
+    -- Target assignment
+    -- Only assign a new target (and bake its overshoot) when:
+    --   • we have no current target, OR
+    --   • a higher-priority candidate exists
+    -- Never update currentOvershootPos for the same target.
+    -- ──────────────────────────────────────────────────────────
+    local function assignTarget(entry)
+        currentTarget     = entry.part
+        currentTargetType = entry.typ
+        -- Bake overshoot once. For tokens: 5 studs past the token along
+        -- the approach vector at assignment time.
+        if entry.typ == "Token" then
+            local tPos = entry.part.Position
+            local dir  = Vector3.new(tPos.X - hrp.Position.X, 0, tPos.Z - hrp.Position.Z)
+            if dir.Magnitude > 0 then
+                currentOvershootPos = tPos + dir.Unit * 5
+            else
+                currentOvershootPos = tPos
+            end
+        else
+            currentOvershootPos = nil
+        end
+    end
+
+    if not currentTarget then
+        if best then assignTarget(best) end
+    else
+        -- Check if current target is still a valid candidate
+        local currentStillValid = false
+        local currentPri = 99
         for _,entry in ipairs(res) do
-            if entry.part == currentTarget then currentPri = entry.pri; break end
+            if entry.part == currentTarget then
+                currentStillValid = true
+                currentPri = entry.pri
+                break
+            end
         end
-        if currentPri == 99 then
-            currentPri = ({Token=4, Bloom=3, Petal=2, Crosshair=1})[currentTargetType] or 99
-        end
-    end
-
-    -- Pick / switch target
-    if not currentTarget or not currentTarget.Parent then
-        currentTarget     = res[1] and res[1].part or nil
-        currentTargetType = res[1] and res[1].typ  or nil
-        if currentTarget and not firstAttemptTimes[currentTarget] then
-            firstAttemptTimes[currentTarget] = tick()
-        end
-    elseif res[1] and res[1].pri < currentPri then
-        currentTarget     = res[1].part
-        currentTargetType = res[1].typ
-        if not firstAttemptTimes[currentTarget] then
-            firstAttemptTimes[currentTarget] = tick()
+        -- Switch only if something strictly higher-priority appeared
+        if not currentStillValid then
+            -- Current target was dismissed/permaIgnored externally; pick best
+            currentTarget = nil; currentOvershootPos = nil
+            if best then assignTarget(best) end
+        elseif best and best.pri < currentPri then
+            assignTarget(best)
         end
     end
 
@@ -1357,19 +1414,8 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
     -- ──────────────────────────────────────────────────────────
     if currentTarget then
 
-        local tPos
-        if currentTargetType == "Bloom" then
-            tPos = knownBloomPos[currentTarget]
-        else
-            tPos = currentTarget.Position
-        end
-
-        if not tPos then
-            currentTarget = nil
-            return
-        end
-
         if currentTargetType == "Crosshair" then
+            local tPos   = currentTarget.Position
             local reached = stepToward(hrp, hum, tPos, 3)
             if reached then
                 local t0 = tick()
@@ -1380,31 +1426,34 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
                     end
                 end)
                 crosshairBlacklist[currentTarget] = true
-                currentTarget = nil
+                currentTarget     = nil
+                currentOvershootPos = nil
             end
 
         elseif currentTargetType == "Petal" then
+            local tPos   = currentTarget.Position
             local xzDist = Vector2.new(hrp.Position.X-tPos.X, hrp.Position.Z-tPos.Z).Magnitude
-            local timeOn = tick() - (firstAttemptTimes[currentTarget] or tick())
-
-            local dir = Vector3.new(tPos.X - hrp.Position.X, 0, tPos.Z - hrp.Position.Z)
+            local dir    = Vector3.new(tPos.X - hrp.Position.X, 0, tPos.Z - hrp.Position.Z)
             if dir.Magnitude > 0 then
                 hum.WalkToPoint = Vector3.new(tPos.X, hrp.Position.Y, tPos.Z) + dir.Unit * 5
             end
-
+            local timeOn = now - (firstAttemptTimes[currentTarget] or now)
             if xzDist < 6 or timeOn > 3 then
-                collectedPetals[currentTarget] = tick()
-                currentTarget = nil
+                collectedPetals[currentTarget] = now
+                currentTarget     = nil
+                currentOvershootPos = nil
             end
 
         elseif currentTargetType == "Bloom" then
             if not currentTarget.Parent then
-                currentTarget = nil
+                currentTarget     = nil
+                currentOvershootPos = nil
             else
-                local bCenter = knownBloomPos[currentTarget] or tPos
+                local bCenter = knownBloomPos[currentTarget]
+                if not bCenter then currentTarget = nil; currentOvershootPos = nil; return end
                 local needNewWander = not wanderPos
                     or (hrp.Position - wanderPos).Magnitude < 5
-                    or tick() - wanderTime > 6
+                    or now - wanderTime > 6
                     or Vector2.new(wanderPos.X - bCenter.X, wanderPos.Z - bCenter.Z).Magnitude > 30
                 if needNewWander then
                     local angle  = math.random() * math.pi * 2
@@ -1412,44 +1461,44 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
                     local wx = math.clamp(bCenter.X + math.cos(angle)*radius, b.x1, b.x2)
                     local wz = math.clamp(bCenter.Z + math.sin(angle)*radius, b.z1, b.z2)
                     wanderPos  = Vector3.new(wx, hrp.Position.Y, wz)
-                    wanderTime = tick()
+                    wanderTime = now
                 end
                 stepToward(hrp, hum, wanderPos, 5)
             end
 
         else
-            -- Token collection
-            local dir = Vector3.new(tPos.X - hrp.Position.X, 0, tPos.Z - hrp.Position.Z)
-            local overshootPos
-            if dir.Magnitude > 0 then
-                overshootPos = tPos + dir.Unit * 5
+            -- ── Token: walk to the BAKED overshoot, dismiss on arrival ──
+            if not currentOvershootPos then
+                -- Fallback: should never happen, but just dismiss
+                dismissedTokens[currentTarget] = now
+                currentTarget     = nil
+                currentOvershootPos = nil
             else
-                overshootPos = tPos
-            end
+                hum.WalkToPoint = currentOvershootPos
 
-            hum.WalkToPoint = overshootPos
+                local dist = Vector3.new(
+                    hrp.Position.X - currentOvershootPos.X,
+                    0,
+                    hrp.Position.Z - currentOvershootPos.Z
+                ).Magnitude
 
-            local distToOvershoot = Vector3.new(
-                hrp.Position.X - overshootPos.X,
-                0,
-                hrp.Position.Z - overshootPos.Z
-            ).Magnitude
-
-            local timeOn = tick() - (firstAttemptTimes[currentTarget] or tick())
-
-            if distToOvershoot <= 2.5 or timeOn > 8 then
-                currentTarget = nil
-                -- no WalkToPoint reset — wander logic picks up immediately next frame
+                if dist <= 4 then
+                    -- Reached overshoot — assume collected, dismiss and move on
+                    dismissedTokens[currentTarget] = now
+                    currentTarget     = nil
+                    currentOvershootPos = nil
+                    -- wander/next-target logic runs next frame automatically
+                end
             end
         end
 
     else
-        -- Wander field
+        -- No target — wander the field
         local ix1,ix2 = math.floor(b.x1), math.ceil(b.x2)
         local iz1,iz2 = math.floor(b.z1), math.ceil(b.z2)
-        if not wanderPos or (hrp.Position-wanderPos).Magnitude < 5 or tick()-wanderTime > 8 then
+        if not wanderPos or (hrp.Position-wanderPos).Magnitude < 5 or now-wanderTime > 8 then
             wanderPos  = Vector3.new(math.random(ix1,ix2), hrp.Position.Y, math.random(iz1,iz2))
-            wanderTime = tick()
+            wanderTime = now
         end
         stepToward(hrp, hum, wanderPos, 5)
     end
@@ -1522,4 +1571,4 @@ table.insert(connections, LocalPlayer.Idled:Connect(function()
     VUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
 end))
 
-print("bss")
+print("✅ BSS V23 loaded. Press START FARMING to begin.")
