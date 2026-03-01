@@ -1,6 +1,3 @@
--- ============================================================
--- BSS MASTER V23 — Full rewrite, all bugs fixed
--- ============================================================
 if _G.Running then return end
 _G.Running = true
 
@@ -61,14 +58,16 @@ local function calcField(v1, v2)
     }
 end
 
-local Fields = {["Pine Tree Forest"]  = { center=Vector3.new(-330,70,-190), bounds={x1=-375.75,x2=-284.05,z1=-251.95,z2=-128.05} },
+local Fields = {
+    ["Pine Tree Forest"]  = { center=Vector3.new(-330,70,-190), bounds={x1=-375.75,x2=-284.05,z1=-251.95,z2=-128.05} },
     ["Sunflower Field"]   = calcField(Vector3.new(-172.129,3.997,240.270),  Vector3.new(-252.242,3.997,108.677)),
     ["Dandelion Field"]   = calcField(Vector3.new(-103.944,3.997,183.925),  Vector3.new(39.818,3.997,255.512)),
     ["Clover Field"]      = calcField(Vector3.new(104.108,33.498,136.491),  Vector3.new(207.439,33.498,250.944)),
     ["Blue Flower Field"] = calcField(Vector3.new(60.214,3.997,128.230),    Vector3.new(231.783,3.997,64.574)),
     ["Bamboo Field"]      = calcField(Vector3.new(207.705,19.998,-63.421),  Vector3.new(52.312,19.998,7.943)),
     ["Spider Field"]      = calcField(Vector3.new(12.027,19.998,36.113),    Vector3.new(-98.953,19.998,-63.378)),
-    ["Strawberry Field"]  = calcField(Vector3.new(-137.164,19.998,39.613),  Vector3.new(-222.992,19.998,-63.411)),["Rose Field"]        = calcField(Vector3.new(-267.982,19.480,168.147), Vector3.new(-392.378,19.480,88.540)),
+    ["Strawberry Field"]  = calcField(Vector3.new(-137.164,19.998,39.613),  Vector3.new(-222.992,19.998,-63.411)),
+    ["Rose Field"]        = calcField(Vector3.new(-267.982,19.480,168.147), Vector3.new(-392.378,19.480,88.540)),
     ["Cactus Field"]      = calcField(Vector3.new(-252.308,67.790,-139.652),Vector3.new(-124.002,67.819,-68.288)),
     ["Pumpkin Patch"]     = calcField(Vector3.new(-255.686,67.753,-152.540),Vector3.new(-124.199,67.425,-219.453)),
     ["Mountain Top"]      = calcField(Vector3.new(28.013,175.982,-111.858), Vector3.new(123.606,175.924,-223.915)),
@@ -80,12 +79,15 @@ local FieldOrder = {
     "Rose Field","Cactus Field","Pumpkin Patch","Mountain Top","Pineapple Patch"
 }
 
-local Boosters = {["Blue Field Booster"]  = { pos=Vector3.new(272,59,84),      collectibles=false, time=2700  },
+local Boosters = {
+    ["Blue Field Booster"]  = { pos=Vector3.new(272,59,84),      collectibles=false, time=2700  },
     ["Wealth Clock"]        = { pos=Vector3.new(330,50,191),     collectibles=false, time=3600  },
-    ["Stockings"]           = { pos=Vector3.new(232,38,232),     collectibles=true,  time=3600  },["Onett"]               = { pos=Vector3.new(34,236,-512),    collectibles=true,  time=28800 },
+    ["Stockings"]           = { pos=Vector3.new(232,38,232),     collectibles=true,  time=3600  },
+    ["Onett"]               = { pos=Vector3.new(34,236,-512),    collectibles=true,  time=28800 },
     ["Glue Dispenser"]      = { pos=Vector3.new(270,25258,-722), collectibles=false, time=79200 },
     ["Gingerbread House"]   = { pos=Vector3.new(-201,6,96),      collectibles=false, time=7200  },
-    ["Memory Match"]        = { pos=Vector3.new(137,69,-95),     collectibles=false, time=7200,  isMM=true },["Mega Memory Match"]   = { pos=Vector3.new(-428,70,-53),    collectibles=false, time=14400, isMM=true },
+    ["Memory Match"]        = { pos=Vector3.new(137,69,-95),     collectibles=false, time=7200,  isMM=true },
+    ["Mega Memory Match"]   = { pos=Vector3.new(-428,70,-53),    collectibles=false, time=14400, isMM=true },
     ["Night Memory Match"]  = { pos=Vector3.new(-17,312,-270),   collectibles=false, time=28800, isMM=true },
     ["Extreme Memory Match"]= { pos=Vector3.new(-403,111,545),   collectibles=false, time=28800, isMM=true },
 }
@@ -101,7 +103,7 @@ local BoosterOrder = {
 -- Farming
 local isFarming          = false
 local currentField       = "Pine Tree Forest"
-local sprinklerField     = ""   -- which field has our sprinkler
+local sprinklerField     = ""
 
 -- Honey conversion
 local isConverting       = false
@@ -200,14 +202,21 @@ local function tpTo(pos)
     hrp.CFrame      = CFrame.new(pos)
 end
 
+-- FIX: unanchor now properly restores WalkSpeed
 local function anchor()
     local _, hrp, hum = getChar()
-    if hum then hum.WalkSpeed = 0; hum.WalkToPoint = hrp and hrp.Position or Vector3.zero end
+    if hum then
+        hum.WalkSpeed   = 0
+        hum.WalkToPoint = hrp and hrp.Position or Vector3.zero
+    end
 end
 
 local function unanchor()
     local _, hrp, hum = getChar()
-    if hum then hum.WalkToPoint = hrp and hrp.Position or Vector3.zero end
+    if hum then
+        hum.WalkSpeed   = 16
+        hum.WalkToPoint = hrp and hrp.Position or Vector3.zero
+    end
 end
 
 local function stepToward(hrp, hum, targetPos, threshold)
@@ -519,57 +528,51 @@ local function createUI()
             if not isCheckingBoosters and not boosterScanDone then
                 isCheckingBoosters = true
                 task.spawn(function()
-                    local activateBtn = LocalPlayer.PlayerGui:WaitForChild("ScreenGui"):WaitForChild("ActivateButton")
-                    for _,name in ipairs(BoosterOrder) do
+                    for _, name in ipairs(BoosterOrder) do
                         if boosterPermaIgnore[name] then continue end
                         tpTo(Boosters[name].pos)
                         anchor()
                         task.wait(1.8)
-                        local bg  = activateBtn.BackgroundColor3
-                        local txt = activateBtn.TextBox.Text
-                        local cd  = parseCooldown(txt)
-                        local r,g,b = math.round(bg.R*255), math.round(bg.G*255), math.round(bg.B*255)
-                        local isSpend = txt:lower():find("spend") ~= nil and not cd
-                        if r>=180 and g<=60 and b<=60 and not cd and not isSpend then
-                            boosterPermaIgnore[name] = true
+
+                        local activateBtn = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui")
+                                        and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
+                        local btnText = activateBtn and activateBtn:FindFirstChild("TextBox") and activateBtn.TextBox.Text or ""
+                        local btnBG   = activateBtn and activateBtn.BackgroundColor3 or Color3.fromRGB(0,0,0)
+                        local r = math.round(btnBG.R * 255)
+                        local g = math.round(btnBG.G * 255)
+                        local b = math.round(btnBG.B * 255)
+                        local cd = parseCooldown(btnText)
+
+                        if cd and cd > 0 then
+                            -- Has cooldown → log and schedule
                             if boosterLabels[name] then
-                                boosterLabels[name].Text="  "..name..":  [Unavailable]"
-                                boosterLabels[name].TextColor3=Color3.fromRGB(120,60,60)
-                            end
-                        elseif isSpend then
-                            local retryIn = 1800
-                            if boosterLabels[name] then
-                                boosterLabels[name].Text="  "..name..":  💰 Need honey (retry 30m)"
-                                boosterLabels[name].TextColor3=Color3.fromRGB(200,150,50)
-                            end
-                            task.delay(retryIn, function()
-                                if not boosterPermaIgnore[name] then
-                                    table.insert(boosterQueue, name)
-                                    if boosterLabels[name] then
-                                        boosterLabels[name].Text="  "..name..":  ✅ READY"
-                                        boosterLabels[name].TextColor3=Color3.fromRGB(80,220,80)
-                                    end
-                                end
-                            end)
-                        elseif cd then
-                            if boosterLabels[name] then
-                                boosterLabels[name].Text="  "..name..":  ⏳ "..fmtTime(cd)
-                                boosterLabels[name].TextColor3=Color3.fromRGB(200,180,60)
+                                boosterLabels[name].Text      = "  "..name..":  ⏳ "..fmtTime(cd)
+                                boosterLabels[name].TextColor3 = Color3.fromRGB(200,180,60)
                             end
                             task.delay(cd, function()
                                 if not boosterPermaIgnore[name] then
                                     table.insert(boosterQueue, name)
                                     if boosterLabels[name] then
-                                        boosterLabels[name].Text="  "..name..":  ✅ READY"
-                                        boosterLabels[name].TextColor3=Color3.fromRGB(80,220,80)
+                                        boosterLabels[name].Text      = "  "..name..":  ✅ READY"
+                                        boosterLabels[name].TextColor3 = Color3.fromRGB(80,220,80)
                                     end
                                 end
                             end)
+
+                        elseif r >= 180 and g <= 60 and b <= 60 then
+                            -- Red → permanently unavailable
+                            boosterPermaIgnore[name] = true
+                            if boosterLabels[name] then
+                                boosterLabels[name].Text      = "  "..name..":  [Unavailable]"
+                                boosterLabels[name].TextColor3 = Color3.fromRGB(120,60,60)
+                            end
+
                         else
+                            -- Ready (includes spend-honey prompts — just queue it)
                             table.insert(boosterQueue, name)
                             if boosterLabels[name] then
-                                boosterLabels[name].Text="  "..name..":  ✅ READY"
-                                boosterLabels[name].TextColor3=Color3.fromRGB(80,220,80)
+                                boosterLabels[name].Text      = "  "..name..":  ✅ READY"
+                                boosterLabels[name].TextColor3 = Color3.fromRGB(80,220,80)
                             end
                         end
                     end
@@ -633,7 +636,8 @@ task.spawn(function()
     local MMLogic = {
         ["Memory Match"]        = { Ignore={["2028574353"]=true,["1471882621"]=true,["2863122826"]=true,["8277901755"]=true}, ListA={["1674871631_x5"]=true,["2529092020"]=true,["2863468407"]=true,["2584584968"]=true,["2545746569"]=true}, ListB={["2504978518"]=true} },
         ["Mega Memory Match"]   = { Ignore={["2028574353"]=true,["1471882621"]=true,["2863122826"]=true,["8277901755"]=true,["3012679515"]=true,["3030407727"]=true}, ListA={["1674871631_x3"]=true,["2863468407_x3"]=true,["2545746569"]=true,["2584584968"]=true,["2542899798"]=true,["15482935937"]=true}, ListB={["2504978518"]=true,["2319943273"]=true,["1674871631_x10"]=true} },
-        ["Night Memory Match"]  = { Ignore={["2028574353"]=true,["8277901755"]=true,["2863122826"]=true}, ListA={["2504978518"]=true,["2314214749"]=true,["2319943273"]=true}, ListB={["2676671613"]=true,["2028603146"]=true} },["Extreme Memory Match"]= { Ignore={["2028574353"]=true,["1471882621"]=true,["1838129169"]=true,["8277901755"]=true}, ListA={["2319943273"]=true,["2542899798"]=true,["2542899798_x5"]=true,["3835877932"]=true}, ListB={["1471850677"]=true,["1471849394"]=true,["15529301204"]=true,["2028603146"]=true} },
+        ["Night Memory Match"]  = { Ignore={["2028574353"]=true,["8277901755"]=true,["2863122826"]=true}, ListA={["2504978518"]=true,["2314214749"]=true,["2319943273"]=true}, ListB={["2676671613"]=true,["2028603146"]=true} },
+        ["Extreme Memory Match"]= { Ignore={["2028574353"]=true,["1471882621"]=true,["1838129169"]=true,["8277901755"]=true}, ListA={["2319943273"]=true,["2542899798"]=true,["2542899798_x5"]=true,["3835877932"]=true}, ListB={["1471850677"]=true,["1471849394"]=true,["15529301204"]=true,["2028603146"]=true} },
     }
 
     local function extractCount(t) return t and t:lower():match("x%d+") or "" end
@@ -798,14 +802,14 @@ task.spawn(function()
                             if not boosterPermaIgnore[bName] then
                                 table.insert(boosterQueue, bName)
                                 if boosterLabels[bName] then
-                                    boosterLabels[bName].Text="  "..bName..":  ✅ READY"
-                                    boosterLabels[bName].TextColor3=Color3.fromRGB(80,220,80)
+                                    boosterLabels[bName].Text      = "  "..bName..":  ✅ READY"
+                                    boosterLabels[bName].TextColor3 = Color3.fromRGB(80,220,80)
                                 end
                             end
                         end)
                         if boosterLabels[bName] then
-                            boosterLabels[bName].Text="  "..bName..":  ⏳ "..fmtTime(bTime)
-                            boosterLabels[bName].TextColor3=Color3.fromRGB(200,180,60)
+                            boosterLabels[bName].Text      = "  "..bName..":  ⏳ "..fmtTime(bTime)
+                            boosterLabels[bName].TextColor3 = Color3.fromRGB(200,180,60)
                         end
                     end
                     activeMM = nil; CurrentWinnings={}
@@ -887,112 +891,172 @@ task.spawn(function()
     while _G.Running do
         task.wait(1)
         if not isFarming then continue end
-        if #boosterQueue==0 then continue end
+        if #boosterQueue == 0 then continue end
         if isConverting or activeBooster or warnDisks.processing or isSolvingMM or isCheckingBoosters then continue end
 
         activeBooster = true
         local b = table.remove(boosterQueue, 1)
-        if not b or not Boosters[b] then activeBooster=false; continue end
+        if not b or not Boosters[b] then activeBooster = false; continue end
 
-        if boosterLabels[b] then
-            boosterLabels[b].Text="  "..b..":  🔄 Claiming"
-            boosterLabels[b].TextColor3=Color3.fromRGB(80,180,255)
-        end
-
+        -- Teleport to booster and wait for proximity
         tpTo(Boosters[b].pos)
         anchor()
-        task.wait(1.5)
-        pressE()
-        task.wait(0.5)
+        task.wait(1.8)
 
-        if Boosters[b].isMM then
-            local found=false
-            local t0=tick()
-            while tick()-t0 < 6 do
-                task.wait(0.25)
-                local sg2=LocalPlayer.PlayerGui:FindFirstChild("ScreenGui")
-                local ml=sg2 and sg2:FindFirstChild("MinigameLayer")
-                if ml then
-                    for _,child in pairs(ml:GetChildren()) do
-                        if child.Name=="MemoryMatchFrame" then
-                            local cl=child:FindFirstChild("ChancesFrame") and child.ChancesFrame:FindFirstChild("CountLabel")
-                            if cl then
-                                local n = tonumber(cl.Text:match("%d+")) or tonumber(cl.ContentText and cl.ContentText:match("%d+")) or 0
-                                if n>=1 then found=true; break end
-                            end
-                        end
-                    end
-                end
-                if found then break end
-            end
+        -- Read the ActivateButton
+        local abtn    = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui")
+                    and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
+        local btnText = abtn and abtn:FindFirstChild("TextBox") and abtn.TextBox.Text or ""
+        local btnBG   = abtn and abtn.BackgroundColor3 or Color3.fromRGB(0,0,0)
+        local r  = math.round(btnBG.R * 255)
+        local g  = math.round(btnBG.G * 255)
+        local bv = math.round(btnBG.B * 255)
+        local cd = parseCooldown(btnText)
 
-            if found then
-                activeMM      = b
-                isSolvingMM   = true
-                mmBoardGoneAt = 0
-                if boosterLabels[b] then
-                    boosterLabels[b].Text="  "..b..":  🧠 Solving"
-                    boosterLabels[b].TextColor3=Color3.fromRGB(180,120,255)
-                end
-            else
-                local cd = Boosters[b].time
-                local abtn = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui") and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
-                if abtn and abtn:FindFirstChild("TextBox") then
-                    local rc = parseCooldown(abtn.TextBox.Text)
-                    if rc and rc>0 then cd=rc end
-                end
-                task.delay(cd, function()
-                    if not boosterPermaIgnore[b] then
-                        table.insert(boosterQueue,b)
-                        if boosterLabels[b] then
-                            boosterLabels[b].Text="  "..b..":  ✅ READY"
-                            boosterLabels[b].TextColor3=Color3.fromRGB(80,220,80)
-                        end
-                    end
-                end)
-                if boosterLabels[b] then
-                    boosterLabels[b].Text="  "..b..":  ⏳ "..fmtTime(cd).." (skipped)"
-                    boosterLabels[b].TextColor3=Color3.fromRGB(200,120,60)
-                end
-            end
+        if cd and cd > 0 then
+            -- Cooldown active → log and schedule retry
             unanchor()
-            activeBooster=false
-            tpTo(fieldCenter())
-
-        else
-            unanchor()
-            if Boosters[b].collectibles then
-                local function nearby()
-                    local c={}
-                    for _,t in ipairs(workspace.Collectibles:GetChildren()) do
-                        if t:IsA("Part") and (t.Position-Boosters[b].pos).Magnitude<30 then table.insert(c,t) end
-                    end
-                    return c
-                end
-                local t0=tick()
-                repeat task.wait(0.1) until #nearby()>0 or tick()-t0>6
-                local vt=tick()
-                while tick()-vt<12 do
-                    local n2=nearby(); if #n2==0 then break end
-                    for _,t in ipairs(n2) do tpTo(t.Position); task.wait(0.05) end
-                end
-            end
-            task.delay(Boosters[b].time, function()
+            activeBooster = false
+            task.delay(cd, function()
                 if not boosterPermaIgnore[b] then
-                    table.insert(boosterQueue,b)
+                    table.insert(boosterQueue, b)
                     if boosterLabels[b] then
-                        boosterLabels[b].Text="  "..b..":  ✅ READY"
-                        boosterLabels[b].TextColor3=Color3.fromRGB(80,220,80)
+                        boosterLabels[b].Text      = "  "..b..":  ✅ READY"
+                        boosterLabels[b].TextColor3 = Color3.fromRGB(80,220,80)
                     end
                 end
             end)
             if boosterLabels[b] then
-                boosterLabels[b].Text="  "..b..":  ⏳ "..fmtTime(Boosters[b].time)
-                boosterLabels[b].TextColor3=Color3.fromRGB(200,180,60)
+                boosterLabels[b].Text      = "  "..b..":  ⏳ "..fmtTime(cd)
+                boosterLabels[b].TextColor3 = Color3.fromRGB(200,180,60)
             end
-            task.wait(1.5)
-            activeBooster=false
             tpTo(fieldCenter())
+            continue
+
+        elseif r >= 180 and g <= 60 and bv <= 60 then
+            -- Red button → permanently unavailable
+            boosterPermaIgnore[b] = true
+            unanchor()
+            activeBooster = false
+            if boosterLabels[b] then
+                boosterLabels[b].Text      = "  "..b..":  [Unavailable]"
+                boosterLabels[b].TextColor3 = Color3.fromRGB(120,60,60)
+            end
+            tpTo(fieldCenter())
+            continue
+
+        else
+            -- Ready (includes spend-honey prompts — just claim it)
+            if boosterLabels[b] then
+                boosterLabels[b].Text      = "  "..b..":  🔄 Claiming"
+                boosterLabels[b].TextColor3 = Color3.fromRGB(80,180,255)
+            end
+
+            pressE()
+            task.wait(0.6)
+
+            if Boosters[b].isMM then
+                -- Memory Match path: wait for the board to appear
+                local found = false
+                local t0    = tick()
+                while tick() - t0 < 6 do
+                    task.wait(0.2)
+                    local sg2 = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui")
+                    local ml  = sg2 and sg2:FindFirstChild("MinigameLayer")
+                    if ml then
+                        for _, child in pairs(ml:GetChildren()) do
+                            if child.Name == "MemoryMatchFrame" then
+                                local cl = child:FindFirstChild("ChancesFrame")
+                                       and child.ChancesFrame:FindFirstChild("CountLabel")
+                                if cl then
+                                    local n = tonumber(cl.Text:match("%d+"))
+                                           or tonumber(cl.ContentText and cl.ContentText:match("%d+"))
+                                           or 0
+                                    if n >= 1 then found = true; break end
+                                end
+                            end
+                        end
+                    end
+                    if found then break end
+                end
+
+                unanchor()
+
+                if found then
+                    activeMM      = b
+                    isSolvingMM   = true
+                    mmBoardGoneAt = 0
+                    activeBooster = false
+                    if boosterLabels[b] then
+                        boosterLabels[b].Text      = "  "..b..":  🧠 Solving"
+                        boosterLabels[b].TextColor3 = Color3.fromRGB(180,120,255)
+                    end
+                else
+                    -- Board never appeared; re-read cooldown or fall back to default
+                    local retryCD = Boosters[b].time
+                    local abtn2   = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui")
+                                and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
+                    if abtn2 and abtn2:FindFirstChild("TextBox") then
+                        local rc = parseCooldown(abtn2.TextBox.Text)
+                        if rc and rc > 0 then retryCD = rc end
+                    end
+                    task.delay(retryCD, function()
+                        if not boosterPermaIgnore[b] then
+                            table.insert(boosterQueue, b)
+                            if boosterLabels[b] then
+                                boosterLabels[b].Text      = "  "..b..":  ✅ READY"
+                                boosterLabels[b].TextColor3 = Color3.fromRGB(80,220,80)
+                            end
+                        end
+                    end)
+                    if boosterLabels[b] then
+                        boosterLabels[b].Text      = "  "..b..":  ⏳ "..fmtTime(retryCD).." (board missed)"
+                        boosterLabels[b].TextColor3 = Color3.fromRGB(200,120,60)
+                    end
+                    activeBooster = false
+                    tpTo(fieldCenter())
+                end
+
+            else
+                -- Non-MM booster path
+                unanchor()
+
+                if Boosters[b].collectibles then
+                    local function nearby()
+                        local c = {}
+                        for _, t in ipairs(workspace.Collectibles:GetChildren()) do
+                            if t:IsA("Part") and (t.Position - Boosters[b].pos).Magnitude < 30 then
+                                table.insert(c, t)
+                            end
+                        end
+                        return c
+                    end
+                    local t0 = tick()
+                    repeat task.wait(0.1) until #nearby() > 0 or tick() - t0 > 6
+                    local vt = tick()
+                    while tick() - vt < 12 do
+                        local n2 = nearby(); if #n2 == 0 then break end
+                        for _, t in ipairs(n2) do tpTo(t.Position); task.wait(0.05) end
+                    end
+                end
+
+                task.delay(Boosters[b].time, function()
+                    if not boosterPermaIgnore[b] then
+                        table.insert(boosterQueue, b)
+                        if boosterLabels[b] then
+                            boosterLabels[b].Text      = "  "..b..":  ✅ READY"
+                            boosterLabels[b].TextColor3 = Color3.fromRGB(80,220,80)
+                        end
+                    end
+                end)
+                if boosterLabels[b] then
+                    boosterLabels[b].Text      = "  "..b..":  ⏳ "..fmtTime(Boosters[b].time)
+                    boosterLabels[b].TextColor3 = Color3.fromRGB(200,180,60)
+                end
+                task.wait(1.5)
+                activeBooster = false
+                tpTo(fieldCenter())
+            end
         end
     end
 end)
@@ -1200,7 +1264,6 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
             if math.abs(p.Position.Y - hrp.Position.Y) > 5 then permaIgnore[p]=true; continue end
             if firstAttemptTimes[p] and tick()-firstAttemptTimes[p] > 8 then permaIgnore[p]=true; continue end
             if inField(p.Position) then
-                -- Determine ID from the part name or its Decal/Mesh texture
                 local partID = p.Name
                 local img = p:FindFirstChildWhichIsA("Decal") or p:FindFirstChildWhichIsA("SpecialMesh")
                 if img then
@@ -1355,10 +1418,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
             end
 
         else
-            -- ── Token collection ──
-            -- Walk toward tPos + overshoot 5 studs along the approach vector.
-            -- Dismiss the token once we are within 2.5 studs of the overshoot point,
-            -- OR the attempt has timed out (8s), OR the token is gone.
+            -- Token collection
             local dir = Vector3.new(tPos.X - hrp.Position.X, 0, tPos.Z - hrp.Position.Z)
             local overshootPos
             if dir.Magnitude > 0 then
@@ -1379,6 +1439,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
 
             if distToOvershoot <= 2.5 or timeOn > 8 then
                 currentTarget = nil
+                -- no WalkToPoint reset — wander logic picks up immediately next frame
             end
         end
 
@@ -1461,4 +1522,4 @@ table.insert(connections, LocalPlayer.Idled:Connect(function()
     VUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
 end))
 
-print("✅ BSS V23 loaded. Press START FARMING to begin.")
+print("bss")
