@@ -26,6 +26,31 @@ end)
 -- ============================================================
 local WEBHOOK = "https://discord.com/api/webhooks/1328668957774839819/5-ooyV3yMEsU46cfNtF9NV8a0kyNA0u2Q4xXxeK5HEroIU5yCwqIcmq-8MM7V0bYGBwI"
 
+local ImportantIDs = {
+    ["6087969886"] = true, -- Snowflake
+    ["1471849394"] = true, -- Gold Egg
+    ["1674871631"] = true, -- Ticket Square
+    ["2319943273"] = true, -- Star Jelly
+    ["1471850677"] = true, -- Diamond Egg
+    ["2504978518"] = true, -- Glue
+    ["2542899798"] = true, -- Glitter
+    ["8058047989"] = true, -- Balloon (Red)
+    ["8083436978"] = true, -- Balloon (Inflate)
+    ["8054996680"] = true, -- Dice 2
+    ["8055428094"] = true, -- Dice 3
+    ["6077173317"] = true, -- Gingerbread Bear
+    ["1629547638"] = true, -- Crash
+    ["1442863423"] = true, -- Blue Boost
+    ["1442725244"] = true, -- Buzz Bomb
+    ["1442764904"] = true, -- Buzz Bomb Plus
+    ["1472256444"] = true, -- Baby Love
+    ["4528414666"] = true, -- Summon Frog
+    ["2000457501"] = true, -- Star Small
+    ["4889322534"] = true, -- Fuzz Bombs
+    ["253828517"]  = true, -- Music Note
+    ["1104415222"] = true, -- Little Paws
+}
+
 local function calcField(v1, v2)
     return {
         center = (v1 + v2) / 2,
@@ -79,7 +104,7 @@ local currentField       = "Pine Tree Forest"
 local sprinklerField     = ""   -- which field has our sprinkler
 
 -- Honey conversion
-local isConverting       = false   -- true while at hive making honey
+local isConverting       = false
 local lastHoneyEPress    = 0
 local lastEmptied        = tick()
 local fullBagTime        = 0
@@ -95,33 +120,31 @@ local ignoreBalloonUntil = 0
 local boosterQueue       = {}
 local boosterPermaIgnore = {}
 local isCheckingBoosters = false
-local boosterScanDone    = false  -- scan only ever runs once per script execution
+local boosterScanDone    = false
 local activeBooster      = false
 
 -- Memory Match
 local isSolvingMM        = false
-local activeMM           = nil   -- name of active MM
-local mmBoardGoneAt      = 0    -- tick() when board last disappeared
+local activeMM           = nil
+local mmBoardGoneAt      = 0
 
 -- Field movement
 local warnDisks          = { queue={}, processing=false }
 local permaIgnore        = {}
 local firstAttemptTimes  = {}
-local verifyingTokens    = {}
 local crosshairBlacklist = {}
-local crosshairSeen      = {}  -- tracks how many times each crosshair has been a candidate
+local crosshairSeen      = {}
 local currentTarget      = nil
 local currentTargetType  = nil
 local wanderPos          = nil
 local wanderTime         = 0
 local lastInField        = tick()
-local targetStuds        = 0   -- studs travelled toward current token target
-local lastHRPPos         = nil -- previous frame position for delta calculation
+local lastHRPPos         = nil
 
 -- Blooms & Petals
-local collectBlooms      = true   -- toggle from UI
-local collectedPetals    = {}     -- petals we've walked through -> stores tick()
-local knownBloomPos      = {}     -- bloom instance -> its last known XZ position (safe location)
+local collectBlooms      = true
+local collectedPetals    = {}
+local knownBloomPos      = {}
 
 -- Stats
 local totalPollen        = 0
@@ -131,8 +154,8 @@ local sessionHoney       = LocalPlayer.CoreStats.Honey.Value
 local intervalStart      = tick()
 local intervalHoney      = LocalPlayer.CoreStats.Honey.Value
 local showInterval       = false
-local totalMMRewards     = {}   -- persists for whole session
-local assetNameCache     = {}   -- persists for whole session
+local totalMMRewards     = {}
+local assetNameCache     = {}
 
 -- CSV
 local statsBuffer, tilesBuffer = {}, {}
@@ -169,7 +192,6 @@ local function getChar()
     return c, c and c:FindFirstChild("HumanoidRootPart"), c and c:FindFirstChild("Humanoid")
 end
 
--- Direct CFrame teleport — no pathfinding, no engine fighting, no MoveTo
 local function tpTo(pos)
     local _, hrp = getChar()
     if not hrp then return end
@@ -188,15 +210,12 @@ local function unanchor()
     if hum then hum.WalkToPoint = hrp and hrp.Position or Vector3.zero end
 end
 
--- Move toward a position by directly stepping the CFrame each frame.
--- Walk toward a position using WalkToPoint — natural animation, no pathfinding.
--- Returns true when within threshold. Call every frame.
 local function stepToward(hrp, hum, targetPos, threshold)
     threshold = threshold or 1.5
     local diff = targetPos - hrp.Position
     diff = Vector3.new(diff.X, 0, diff.Z)
     if diff.Magnitude <= threshold then
-        hum.WalkToPoint = hrp.Position  -- stop walking
+        hum.WalkToPoint = hrp.Position
         return true
     end
     hum.WalkToPoint = targetPos
@@ -230,8 +249,6 @@ local function getHivePos()
     return nil
 end
 
--- Safe cooldown parser: only matches xx:xx:xx or x:xx:xx (requires 2-digit seconds and minutes)
--- Will NOT false-match "x1" style text
 local function parseCooldown(txt)
     local h,m,s = txt:match("(%d+):(%d%d):(%d%d)")
     if h then return tonumber(h)*3600 + tonumber(m)*60 + tonumber(s) end
@@ -293,7 +310,6 @@ local function createUI()
     main.Active = true; main.Draggable = true
     local scale = Instance.new("UIScale", main)
 
-    -- Topbar
     local top = Instance.new("Frame", main)
     top.Size = UDim2.new(1,0,0,32); top.BackgroundColor3 = Color3.fromRGB(22,22,28); top.BorderSizePixel=0
 
@@ -309,17 +325,14 @@ local function createUI()
     destroyBtn.TextColor3=Color3.new(1,1,1); destroyBtn.Font=Enum.Font.SourceSansBold
     destroyBtn.TextSize=13; destroyBtn.BorderSizePixel=0
 
-    -- Tab bar
     local tabBar = Instance.new("Frame", main)
     tabBar.Size=UDim2.new(1,0,0,26); tabBar.Position=UDim2.new(0,0,0,32)
     tabBar.BackgroundColor3=Color3.fromRGB(18,18,22); tabBar.BorderSizePixel=0
 
-    -- Content
     local content = Instance.new("Frame", main)
     content.Size=UDim2.new(1,0,1,-58); content.Position=UDim2.new(0,0,0,58)
     content.BackgroundTransparency=1; content.ClipsDescendants=true
 
-    -- Tab system
     local tabFrames, tabBtns = {}, {}
     local tabNames = {"Dash","Stats","Boost","Cfg"}
 
@@ -403,7 +416,7 @@ local function createUI()
         fieldBtns[fname] = fb
         fb.MouseButton1Click:Connect(function()
             currentField   = fname
-            sprinklerField = ""  -- force re-place on next farm cycle
+            sprinklerField = ""
             updateFieldBtns()
         end)
     end
@@ -472,7 +485,6 @@ local function createUI()
     scaleBox.TextColor3=Color3.fromRGB(200,200,220); scaleBox.Font=Enum.Font.Code
     scaleBox.TextSize=12; scaleBox.BorderSizePixel=0; scaleBox.LayoutOrder=11
 
-    -- Wiring
     bloomBtn.MouseButton1Click:Connect(function()
         collectBlooms = not collectBlooms
         bloomBtn.Text = collectBlooms and "Collect Blooms & Petals: ON" or "Collect Blooms & Petals: OFF"
@@ -504,7 +516,6 @@ local function createUI()
             startBtn.Text="■  STOP FARMING"; startBtn.BackgroundColor3=Color3.fromRGB(160,40,40)
             statusLbl.Text="  Status: Farming"
             intervalStart=tick(); intervalHoney=LocalPlayer.CoreStats.Honey.Value
-            -- Kick off booster scan — only runs once per script execution
             if not isCheckingBoosters and not boosterScanDone then
                 isCheckingBoosters = true
                 task.spawn(function()
@@ -605,7 +616,6 @@ task.spawn(function()
         task.wait(30)
         for k in pairs(permaIgnore)        do if typeof(k)=="Instance" and not k.Parent then permaIgnore[k]=nil end end
         for k in pairs(firstAttemptTimes)  do if typeof(k)=="Instance" and not k.Parent then firstAttemptTimes[k]=nil end end
-        for k in pairs(verifyingTokens)    do if typeof(k)=="Instance" and not k.Parent then verifyingTokens[k]=nil end end
         for k in pairs(crosshairBlacklist) do if typeof(k)=="Instance" and not k.Parent then crosshairBlacklist[k]=nil end end
         for k in pairs(crosshairSeen)      do if typeof(k)=="Instance" and not k.Parent then crosshairSeen[k]=nil end end
     end
@@ -676,7 +686,6 @@ task.spawn(function()
         if not ml then return nil end
         for _,child in pairs(ml:GetChildren()) do
             if child.Name=="MemoryMatchFrame" then
-                -- Use .Text not .ContentText — ContentText is not a real writable/reliable property name
                 local lbl2 = child:FindFirstChild("ChancesFrame") and child.ChancesFrame:FindFirstChild("CountLabel")
                 if lbl2 then
                     local n = tonumber(lbl2.Text:match("%d+")) or tonumber(lbl2.ContentText and lbl2.ContentText:match("%d+")) or 0
@@ -723,8 +732,6 @@ task.spawn(function()
 
     local function doTurn(mtype, action, s1, s2)
         if action=="Match" or action=="Random" then
-            -- s1 and s2 are already known — just flip both
-            -- Use clickSlot for s2 (no need to wait for image reveal on a known match)
             local idA,ctA = clickAndRead(s1)
             task.wait(0.2)
             clickSlot(s2)
@@ -779,16 +786,13 @@ task.spawn(function()
         local board = getBoard()
 
         if not board then
-            -- Board is gone
             if isSolvingMM then
                 if mmBoardGoneAt == 0 then mmBoardGoneAt = tick() end
-                -- Wait 3 seconds of board being gone before treating as finished
                 if tick() - mmBoardGoneAt >= 3 then
                     isSolvingMM = false
                     onMMDone()
-                    -- Schedule re-queue
                     if activeMM and Boosters[activeMM] then
-                        local bName = activeMM  -- capture before we nil it below
+                        local bName = activeMM
                         local bTime = Boosters[bName].time
                         task.delay(bTime, function()
                             if not boosterPermaIgnore[bName] then
@@ -811,7 +815,6 @@ task.spawn(function()
             continue
         end
 
-        -- Board is visible — reset gone timer
         mmBoardGoneAt = 0
 
         if board ~= CurrentBoard then
@@ -878,7 +881,7 @@ local function runDisks()
 end
 
 -- ============================================================
--- 9. BOOSTER DISPATCH (dedicated task — never shares coroutine)
+-- 9. BOOSTER DISPATCH
 -- ============================================================
 task.spawn(function()
     while _G.Running do
@@ -896,7 +899,6 @@ task.spawn(function()
             boosterLabels[b].TextColor3=Color3.fromRGB(80,180,255)
         end
 
-        -- Teleport and hard-anchor — nothing can move us
         tpTo(Boosters[b].pos)
         anchor()
         task.wait(1.5)
@@ -904,7 +906,6 @@ task.spawn(function()
         task.wait(0.5)
 
         if Boosters[b].isMM then
-            -- Poll for board opening (up to 6s)
             local found=false
             local t0=tick()
             while tick()-t0 < 6 do
@@ -934,7 +935,6 @@ task.spawn(function()
                     boosterLabels[b].TextColor3=Color3.fromRGB(180,120,255)
                 end
             else
-                -- Board never opened — read cooldown from button
                 local cd = Boosters[b].time
                 local abtn = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui") and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
                 if abtn and abtn:FindFirstChild("TextBox") then
@@ -960,7 +960,6 @@ task.spawn(function()
             tpTo(fieldCenter())
 
         else
-            -- Normal booster — unanchor before collectible vacuum
             unanchor()
             if Boosters[b].collectibles then
                 local function nearby()
@@ -1033,33 +1032,30 @@ task.spawn(function()
             UI.mm.Text = #lines>0 and table.concat(lines,"\n") or "  No rewards yet."
         end
 
-        -- CSV
         local cP,cC = LocalPlayer.CoreStats.Pollen.Value, LocalPlayer.CoreStats.Capacity.Value
         table.insert(statsBuffer, string.format("%s,%d,%d,%d,%d,%d", os.date("%H:%M:%S"), LocalPlayer.CoreStats.Honey.Value, math.floor(hps), cP, math.floor(pps), cC))
         if tick()-lastSaveTime >= SAVE_INTERVAL then flushCSV(); lastSaveTime=tick() end
 
-        -- Expire timed balloon ignore
         if ignoreBalloonUntil>0 and tick()>ignoreBalloonUntil then ignoreBalloonUntil=0 end
     end
 end)
 
 -- ============================================================
--- 11. HONEY CONVERSION TASK (dedicated task — safe to yield)
+-- 11. HONEY CONVERSION TASK
 -- ============================================================
 task.spawn(function()
-    local didInitialSetup = false  -- tracks whether we did initial teleport+toggle this conversion
+    local didInitialSetup = false
 
     while _G.Running do
         task.wait(0.1)
         if not isFarming or not isConverting then
-            didInitialSetup = false  -- reset for next conversion
+            didInitialSetup = false
             continue
         end
 
         local _,hrp = getChar()
         if not hrp then continue end
 
-        -- First entry: teleport to hive, equip mask, start honey making
         if not didInitialSetup then
             didInitialSetup = true
             local hP = getHivePos()
@@ -1072,7 +1068,6 @@ task.spawn(function()
             continue
         end
 
-        -- Stay at hive
         local hPos = getHivePos()
         if hPos then
             local xzd = Vector2.new(hrp.Position.X-hPos.X, hrp.Position.Z-hPos.Z).Magnitude
@@ -1083,7 +1078,6 @@ task.spawn(function()
         if abtn and abtn:FindFirstChild("TextBox") then
             local txt = abtn.TextBox.Text
 
-            -- Done converting
             if txt:find("Pollen From Flower Fields") then
                 RepStorage.Events.ItemPackageEvent:InvokeServer("Equip",{["Category"]="Accessory",["Type"]="Diamond Mask"})
                 isConverting    = false
@@ -1093,24 +1087,17 @@ task.spawn(function()
                 continue
             end
 
-            -- Keep pressing E if button says "Make Honey"
             if txt:lower():find("make honey") and tick()-lastHoneyEPress>5 then
                 lastHoneyEPress=tick(); pressE()
             end
 
-            -- Balloon bail: only when ignore is ON
-            -- If ignore is OFF (default), we just stay at the hive and wait normally —
-            -- the balloon speeds up conversion and the done-text will appear by itself.
-            -- If ignore is ON and pollen=0 and still converting after 5s, bail back to field.
             local shouldIgnore = ignoreBalloonever or (tick()<ignoreBalloonUntil)
             if shouldIgnore and not balloonBailPending then
                 local pol = LocalPlayer.CoreStats.Pollen.Value
                 if pol == 0 then
-                    -- Pollen is 0 but still converting — wait 5s then bail
                     balloonBailPending = true
                     task.spawn(function()
                         task.wait(5)
-                        -- Still converting and pollen still 0? Then bail
                         if isConverting and LocalPlayer.CoreStats.Pollen.Value == 0 then
                             isConverting    = false
                             didInitialSetup = false
@@ -1125,14 +1112,13 @@ task.spawn(function()
 end)
 
 -- ============================================================
--- 12. SPRINKLER TASK (dedicated task — safe to yield)
+-- 12. SPRINKLER TASK
 -- ============================================================
 task.spawn(function()
     while _G.Running do
         task.wait(0.5)
         if not isFarming or isConverting or activeBooster or isCheckingBoosters or isSolvingMM then continue end
         if sprinklerField == currentField then continue end
-        -- Place sprinkler at field center
         tpTo(fieldCenter())
         task.wait(0.6)
         RepStorage.Events.PlayerActivesCommand:FireServer({Name="Sprinkler Builder"})
@@ -1142,7 +1128,7 @@ task.spawn(function()
 end)
 
 -- ============================================================
--- 13. HEARTBEAT — failsafes only (no yielding, no business logic)
+-- 13. HEARTBEAT — failsafes only
 -- ============================================================
 table.insert(connections, RunService.Heartbeat:Connect(function()
     if not _G.Running then return end
@@ -1152,12 +1138,10 @@ table.insert(connections, RunService.Heartbeat:Connect(function()
     local _,hrp = getChar()
     if not hrp then return end
 
-    -- Zero XZ velocity every frame while at a booster so the character can't drift
     if activeBooster or isCheckingBoosters then
         hrp.Velocity = Vector3.new(0, hrp.Velocity.Y, 0)
     end
 
-    -- Out-of-field failsafe (only when freely farming)
     if not isConverting and not isCheckingBoosters and not activeBooster and not isSolvingMM then
         if not inField(hrp.Position) then
             if tick()-lastInField > 10 then tpTo(fieldCenter()); lastInField=tick() end
@@ -1165,17 +1149,10 @@ table.insert(connections, RunService.Heartbeat:Connect(function()
             lastInField = tick()
         end
     end
-
-    -- Clean up stale verifying tokens
-    for t,time in pairs(verifyingTokens) do
-        if not t.Parent or math.abs(t.Orientation.X)>20 or tick()-time>1.2 then
-            verifyingTokens[t]=nil
-        end
-    end
 end))
 
 -- ============================================================
--- 14. MAIN FARMING LOOP — RenderStepped (NO yielding here at all)
+-- 14. MAIN FARMING LOOP — RenderStepped
 -- ============================================================
 table.insert(connections, RunService.RenderStepped:Connect(function(dt)
     if not _G.Running or not isFarming then return end
@@ -1193,7 +1170,6 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
             if tick()-lastEmptied<5 then quickRefill+=1 else quickRefill=0 end
         end
         if quickRefill>=5 or tick()-fullBagTime>=5 then
-            -- Just set the flag — conversion task will handle teleport+toggle
             isConverting   = true
             waitingForBees = false
             quickRefill    = 0
@@ -1211,19 +1187,29 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
 
     local b = fieldBounds()
 
+    -- ──────────────────────────────────────────────────────────
     -- Build target list
-    -- Priority: 0=VIP collectible, 1=Crosshair, 2=Petal, 3=Bloom, 4=Normal token
+    -- Priority: 0=Important token, 1=Crosshair, 2=Petal,
+    --           3=Bloom, 4=Normal token
+    -- ──────────────────────────────────────────────────────────
     local res = {}
 
-    -- Collectibles: VIP (pri 0) and normal (pri 4)
+    -- Collectibles: check ImportantIDs for priority
     for _,p in ipairs(workspace.Collectibles:GetChildren()) do
-        if p:IsA("Part") and not verifyingTokens[p] and not permaIgnore[p] then
+        if p:IsA("Part") and not permaIgnore[p] then
             if math.abs(p.Position.Y - hrp.Position.Y) > 5 then permaIgnore[p]=true; continue end
             if firstAttemptTimes[p] and tick()-firstAttemptTimes[p] > 8 then permaIgnore[p]=true; continue end
             if inField(p.Position) then
-                local img   = p:FindFirstChildWhichIsA("Decal") or p:FindFirstChildWhichIsA("SpecialMesh")
-                local isVIP = p.Name=="3690982763" or (img and tostring(img.Texture):find("3690982763"))
-                table.insert(res, {part=p, pri=isVIP and 0 or 4, typ="Token"})
+                -- Determine ID from the part name or its Decal/Mesh texture
+                local partID = p.Name
+                local img = p:FindFirstChildWhichIsA("Decal") or p:FindFirstChildWhichIsA("SpecialMesh")
+                if img then
+                    local tex = tostring(img.Texture or img.MeshId or "")
+                    local extractedID = tex:match("%d+")
+                    if extractedID then partID = extractedID end
+                end
+                local isImportant = ImportantIDs[partID] or ImportantIDs[p.Name]
+                table.insert(res, {part=p, pri=isImportant and 0 or 4, typ="Token"})
             end
         end
     end
@@ -1238,8 +1224,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
     end
 
     if collectBlooms then
-        -- Petals (pri 2): Y ignored — big hitbox, collect on XZ proximity only
-        -- Never retry once collected
+        -- Petals (pri 2)
         for _,p in ipairs(workspace.Particles:GetChildren()) do
             if p.Name=="PetalPart" and not collectedPetals[p] then
                 local xzOk = p.Position.X>=b.x1 and p.Position.X<=b.x2
@@ -1250,7 +1235,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
             end
         end
 
-        -- Blooms (pri 3): walk near them so bees farm them
+        -- Blooms (pri 3)
         local happenings = workspace:FindFirstChild("Happenings")
         local poppable   = happenings and happenings:FindFirstChild("PoppablePlants")
         if poppable then
@@ -1266,60 +1251,56 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
             end
         end
 
-        -- Stale bloom cleanup
         for bloom in pairs(knownBloomPos) do
             if not bloom.Parent then knownBloomPos[bloom] = nil end
         end
     end
 
-    -- Cleanup collectedPetals of gone/recycled instances (15s expire guarantees it doesn't refind them)
+    -- Cleanup collectedPetals
     for p, tTime in pairs(collectedPetals) do
         if tick() - tTime > 15 then collectedPetals[p] = nil end
     end
 
     table.sort(res, function(a,b2) return a.pri < b2.pri end)
 
-    -- Current target priority — VIP tokens stored as typ="Token" but pri 0, track via firstAttemptTimes key
-    -- Simpler: just look up the current target's actual pri from res if it's still in there
+    -- Current target priority
     local currentPri = 99
     if currentTarget then
         for _,entry in ipairs(res) do
             if entry.part == currentTarget then currentPri = entry.pri; break end
         end
-        -- If not in res (e.g. being verified), assign by type
         if currentPri == 99 then
             currentPri = ({Token=4, Bloom=3, Petal=2, Crosshair=1})[currentTargetType] or 99
         end
     end
 
     -- Pick / switch target
-    if not currentTarget or verifyingTokens[currentTarget] or not currentTarget.Parent then
+    if not currentTarget or not currentTarget.Parent then
         currentTarget     = res[1] and res[1].part or nil
         currentTargetType = res[1] and res[1].typ  or nil
-        targetStuds       = 0
         if currentTarget and not firstAttemptTimes[currentTarget] then
             firstAttemptTimes[currentTarget] = tick()
         end
     elseif res[1] and res[1].pri < currentPri then
         currentTarget     = res[1].part
         currentTargetType = res[1].typ
-        targetStuds       = 0
         if not firstAttemptTimes[currentTarget] then
             firstAttemptTimes[currentTarget] = tick()
         end
     end
 
+    -- ──────────────────────────────────────────────────────────
     -- Movement
+    -- ──────────────────────────────────────────────────────────
     if currentTarget then
-        
-        -- Safely extract target position (prevents Bloom 'Model' crash)
+
         local tPos
         if currentTargetType == "Bloom" then
             tPos = knownBloomPos[currentTarget]
         else
             tPos = currentTarget.Position
         end
-        
+
         if not tPos then
             currentTarget = nil
             return
@@ -1337,30 +1318,25 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
                 end)
                 crosshairBlacklist[currentTarget] = true
                 currentTarget = nil
-
             end
 
         elseif currentTargetType == "Petal" then
-            -- Y ignored — walk on XZ only, small overshoot
-            local xzDist   = Vector2.new(hrp.Position.X-tPos.X, hrp.Position.Z-tPos.Z).Magnitude
-            local timeOn   = tick() - (firstAttemptTimes[currentTarget] or tick())
-            if lastHRPPos then targetStuds = targetStuds + (hrp.Position - lastHRPPos).Magnitude end
+            local xzDist = Vector2.new(hrp.Position.X-tPos.X, hrp.Position.Z-tPos.Z).Magnitude
+            local timeOn = tick() - (firstAttemptTimes[currentTarget] or tick())
 
             local dir = Vector3.new(tPos.X - hrp.Position.X, 0, tPos.Z - hrp.Position.Z)
             if dir.Magnitude > 0 then
                 hum.WalkToPoint = Vector3.new(tPos.X, hrp.Position.Y, tPos.Z) + dir.Unit * 5
             end
 
-            if xzDist < 6 or targetStuds > xzDist + 5 or timeOn > 3 then
+            if xzDist < 6 or timeOn > 3 then
                 collectedPetals[currentTarget] = tick()
-                currentTarget = nil; targetStuds = 0
+                currentTarget = nil
             end
 
         elseif currentTargetType == "Bloom" then
-            -- Wander within safe radius of bloom center so bees can farm it
             if not currentTarget.Parent then
-                -- Bloom gone — switch target, petal scan will pick up any petals
-                currentTarget = nil; targetStuds = 0
+                currentTarget = nil
             else
                 local bCenter = knownBloomPos[currentTarget] or tPos
                 local needNewWander = not wanderPos
@@ -1379,19 +1355,30 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
             end
 
         else
-            -- Token: walk through it
-            local distToToken = (hrp.Position - tPos).Magnitude
-            local timeOn      = tick() - (firstAttemptTimes[currentTarget] or tick())
-            if lastHRPPos then targetStuds = targetStuds + (hrp.Position - lastHRPPos).Magnitude end
-
+            -- ── Token collection ──
+            -- Walk toward tPos + overshoot 5 studs along the approach vector.
+            -- Dismiss the token once we are within 2.5 studs of the overshoot point,
+            -- OR the attempt has timed out (8s), OR the token is gone.
             local dir = Vector3.new(tPos.X - hrp.Position.X, 0, tPos.Z - hrp.Position.Z)
+            local overshootPos
             if dir.Magnitude > 0 then
-                hum.WalkToPoint = tPos + dir.Unit * 6
+                overshootPos = tPos + dir.Unit * 5
+            else
+                overshootPos = tPos
             end
 
-            if distToToken < 12 or targetStuds > distToToken + 10 or timeOn > 3 then
-                verifyingTokens[currentTarget] = tick()
-                currentTarget = nil; targetStuds = 0
+            hum.WalkToPoint = overshootPos
+
+            local distToOvershoot = Vector3.new(
+                hrp.Position.X - overshootPos.X,
+                0,
+                hrp.Position.Z - overshootPos.Z
+            ).Magnitude
+
+            local timeOn = tick() - (firstAttemptTimes[currentTarget] or tick())
+
+            if distToOvershoot <= 2.5 or timeOn > 8 then
+                currentTarget = nil
             end
         end
 
