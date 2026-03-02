@@ -1,1867 +1,2156 @@
--- ============================================================
--- BSS MASTER V23 — Full rewrite, all bugs fixed
--- ============================================================
--- Stop any previous running instance cleanly before starting fresh
-_G.Running = false
-task.wait(0.1)
-_G.Running = true
+"""
+BSS Analyzer — generates a self-contained HTML dashboard from BSSLogs CSVs.
 
--- [[ SERVICES ]]
-local Players    = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local HttpService= game:GetService("HttpService")
-local MktService = game:GetService("MarketplaceService")
-local VUser      = game:GetService("VirtualUser")
-local VInput     = game:GetService("VirtualInputManager")
-local RepStorage = game:GetService("ReplicatedStorage")
-local LocalPlayer= Players.LocalPlayer
+Usage:
+    python bss_analyze.py                        # auto-finds latest session
+    python bss_analyze.py --session "Session 3"  # specific session
+    python bss_analyze.py --all                  # merge all sessions
 
-local connections = {}
+Output: BSS_Dashboard.html  (open in any browser)
 
--- [[ EXTERNAL LIBS ]]
-task.spawn(function()
-    loadstring(game:HttpGet("https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source"))()
-end)
+Requirements:
+    pip install pandas
+"""
 
--- ============================================================
--- 1. DATA
--- ============================================================
-local WEBHOOK = "https://discord.com/api/webhooks/1328668957774839819/5-ooyV3yMEsU46cfNtF9NV8a0kyNA0u2Q4xXxeK5HEroIU5yCwqIcmq-8MM7V0bYGBwI"
+import os
+import sys
+import json
+import argparse
+import base64
+import re
+from pathlib import Path
+from datetime import datetime
 
-local ImportantIDs = {
-    ["6087969886"] = true, -- Snowflake
-    ["1471849394"] = true, -- Gold Egg
-    ["1674871631"] = true, -- Ticket Square
-    ["2319943273"] = true, -- Star Jelly
-    ["1471850677"] = true, -- Diamond Egg
-    ["2504978518"] = true, -- Glue
-    ["2542899798"] = true, -- Glitter
-    ["8058047989"] = true, -- Balloon (Red)
-    ["8083436978"] = true, -- Balloon (Inflate)
-    ["8054996680"] = true, -- Dice 2
-    ["8055428094"] = true, -- Dice 3
-    ["6077173317"] = true, -- Gingerbread Bear
-    ["1629547638"] = true, -- Crash
-    ["1442863423"] = true, -- Blue Boost
-    ["1442725244"] = true, -- Buzz Bomb
-    ["1442764904"] = true, -- Buzz Bomb Plus
-    ["1472256444"] = true, -- Baby Love
-    ["4528414666"] = true, -- Summon Frog
-    ["2000457501"] = true, -- Star Small
-    ["4889322534"] = true, -- Fuzz Bombs
-    ["253828517"]  = true, -- Music Note
-    ["1104415222"] = true, -- Little Paws
+try:
+    import pandas as pd
+except ImportError:
+    print("Missing dependency: pip install pandas")
+    sys.exit(1)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+LOG_ROOT   = Path("BSSLogs")
+ASSETS_DIR = LOG_ROOT / "Assets"
+OUTPUT     = Path("BSS_Dashboard.html")
+
+# Default line colors per metric (user can change in the UI too)
+DEFAULT_COLORS = {
+    "HPS":      "#f5c542",
+    "Pollen/s": "#4fc3f7",
+    "Capacity": "#81c784",
+    "Honey":    "#ffb74d",
 }
 
-local function calcField(v1, v2)
+# ─────────────────────────────────────────────────────────────────────────────
+# DATA LOADING
+# ─────────────────────────────────────────────────────────────────────────────
+def find_sessions():
+    if not LOG_ROOT.exists():
+        print(f"Could not find {LOG_ROOT}/ — run the script from the same folder.")
+        sys.exit(1)
+    sessions = sorted(
+        [d for d in LOG_ROOT.iterdir() if d.is_dir() and d.name.startswith("Session ")],
+        key=lambda d: int(re.search(r"\d+", d.name).group())
+    )
+    return sessions
+
+
+def load_session(session_path: Path):
+    """
+    Returns a list of per-hour log dicts:
+      { label, stats_df, tiles_df, summary, tile_summaries }
+    plus a combined entry as the first item labelled "All Hours".
+    """
+    stats_files = sorted(session_path.glob("stats_*.csv"))
+    tiles_files = sorted(session_path.glob("tiles_*.csv"))
+
+    # Build a map by hour-tag so stats and tiles for the same hour are paired
+    def hour_tag(f):
+        # e.g. stats_2026-03-02_14h.csv -> 2026-03-02_14h
+        return f.stem.split("_", 1)[1]
+
+    stats_by_hour = {}
+    for f in stats_files:
+        tag = hour_tag(f)
+        try:
+            df = pd.read_csv(f, parse_dates=["Timestamp"])
+            stats_by_hour[tag] = df
+        except Exception as e:
+            print(f"  Warning: could not read {f}: {e}")
+
+    tiles_by_hour = {}
+    for f in tiles_files:
+        tag = hour_tag(f)
+        try:
+            df = pd.read_csv(f, parse_dates=["Timestamp"])
+            tiles_by_hour[tag] = df
+        except Exception as e:
+            print(f"  Warning: could not read {f}: {e}")
+
+    all_tags = sorted(set(list(stats_by_hour.keys()) + list(tiles_by_hour.keys())))
+
+    hour_logs = []
+    all_stats_frames = []
+    all_tiles_frames = []
+
+    for tag in all_tags:
+        stats = stats_by_hour.get(tag, pd.DataFrame())
+        tiles = tiles_by_hour.get(tag, pd.DataFrame())
+
+        if not stats.empty:
+            stats = stats.sort_values("Timestamp").drop_duplicates("Timestamp")
+            all_stats_frames.append(stats)
+        if not tiles.empty:
+            tiles = tiles.sort_values("Timestamp")
+            all_tiles_frames.append(tiles)
+
+        # Friendly label: "14:00 – 15:00" from the tag
+        hour_match = re.search(r"(\d{2})h$", tag)
+        h = int(hour_match.group(1)) if hour_match else 0
+        friendly = f"{h:02d}:00 – {(h+1)%24:02d}:00"
+
+        hour_logs.append({
+            "label":          friendly,
+            "tag":            tag,
+            "stats":          stats,
+            "tiles":          tiles,
+            "summary":        summarise_stats(stats),
+            "tile_summaries": summarise_tiles(tiles),
+        })
+
+    # Combined entry
+    combined_stats = pd.concat(all_stats_frames, ignore_index=True).sort_values("Timestamp").drop_duplicates("Timestamp") \
+        if all_stats_frames else pd.DataFrame()
+    combined_tiles = pd.concat(all_tiles_frames, ignore_index=True).sort_values("Timestamp") \
+        if all_tiles_frames else pd.DataFrame()
+
+    combined = {
+        "label":          "All Hours",
+        "tag":            "combined",
+        "stats":          combined_stats,
+        "tiles":          combined_tiles,
+        "summary":        summarise_stats(combined_stats),
+        "tile_summaries": summarise_tiles(combined_tiles),
+    }
+
+    return combined, hour_logs
+
+
+def load_asset_image(asset_name: str, asset_id: str = "") -> str:
+    """Return base64 data URI for an asset image, or empty string.
+    Looks for AssetName_ID.png (new format) then AssetName.png (fallback)."""
+    if not ASSETS_DIR.exists():
+        return ""
+
+    def try_file(path: Path) -> str:
+        try:
+            data = path.read_bytes()
+            b64  = base64.b64encode(data).decode()
+            mime = "image/png" if path.suffix == ".png" else "image/jpeg"
+            return f"data:{mime};base64,{b64}"
+        except Exception:
+            return ""
+
+    # Sanitise name the same way Lua does: replace non-alphanumeric with _
+    import re
+    safe = re.sub(r'[\x00-\x1f\x7f\s\W]', '_', asset_name.strip())
+
+    # Try new format: AssetName_ID.png
+    if asset_id:
+        for ext in [".png", ".jpg", ".jpeg", ".webp"]:
+            candidates = list(ASSETS_DIR.glob(f"{safe}_{asset_id}{ext}"))
+            if candidates:
+                result = try_file(candidates[0])
+                if result:
+                    return result
+
+    # Fallback: any file starting with the sanitised name
+    for ext in [".png", ".jpg", ".jpeg", ".webp"]:
+        candidates = list(ASSETS_DIR.glob(f"{safe}*{ext}"))
+        if candidates:
+            result = try_file(candidates[0])
+            if result:
+                return result
+
+    return ""
+
+
+def summarise_stats(stats: pd.DataFrame) -> dict:
+    if stats.empty:
+        return {}
+    duration = (stats["Timestamp"].max() - stats["Timestamp"].min()).total_seconds()
+    honey_gained = stats["TotalHoney"].iloc[-1] - stats["TotalHoney"].iloc[0]
+    peak_hps  = stats["HPS"].max()
+    avg_hps   = stats["HPS"].mean()
+    peak_cap  = stats["Capacity"].max()
+    converting_pct = (stats["Converting"] == True).mean() * 100  # noqa: E712
+
+    fields = stats["Field"].value_counts().to_dict() if "Field" in stats.columns else {}
+
     return {
-        center = (v1 + v2) / 2,
-        bounds = {
-            x1 = math.min(v1.X,v2.X), x2 = math.max(v1.X,v2.X),
-            z1 = math.min(v1.Z,v2.Z), z2 = math.max(v1.Z,v2.Z),
+        "duration_s":      round(duration),
+        "honey_gained":    int(honey_gained),
+        "peak_hps":        round(peak_hps, 1),
+        "avg_hps":         round(avg_hps, 1),
+        "peak_capacity":   int(peak_cap),
+        "converting_pct":  round(converting_pct, 1),
+        "fields":          fields,
+    }
+
+
+def summarise_tiles(tiles: pd.DataFrame) -> list:
+    """Per-tile summary: first seen, last seen, total active time, peak mult."""
+    if tiles.empty:
+        return []
+    results = []
+    for asset_id, grp in tiles.groupby("AssetID"):
+        grp = grp.sort_values("Timestamp")
+        name = grp["AssetName"].iloc[0]
+        active = grp[grp["State"] == "Active"]
+        removed = grp[grp["State"] == "Removed"]
+
+        # Pair up Active/Removed events to compute total uptime
+        total_active_s = 0
+        last_active_ts = None
+        for _, row in grp.iterrows():
+            if row["State"] == "Active":
+                last_active_ts = row["Timestamp"]
+            elif row["State"] == "Removed" and last_active_ts is not None:
+                total_active_s += (row["Timestamp"] - last_active_ts).total_seconds()
+                last_active_ts = None
+
+        # If still active at end of session
+        if last_active_ts is not None and not grp.empty:
+            total_active_s += (grp["Timestamp"].max() - last_active_ts).total_seconds()
+
+        peak_mult = active["Multiplier"].max() if not active.empty else 0
+
+        results.append({
+            "asset_id":       str(asset_id),
+            "name":           name,
+            "first_seen":     grp["Timestamp"].min().isoformat(),
+            "last_seen":      grp["Timestamp"].max().isoformat(),
+            "total_active_s": round(total_active_s),
+            "appearances":    len(active),
+            "peak_mult":      int(peak_mult),
+            "image":          load_asset_image(name, str(asset_id)),
+            "timestamps":     [t.isoformat() for t in grp["Timestamp"].tolist()],
+            "states":         grp["State"].tolist(),
+            "multipliers":    grp["Multiplier"].tolist(),
+        })
+
+    results.sort(key=lambda x: x["total_active_s"], reverse=True)
+    return results
+
+
+def fmt_duration(seconds: int) -> str:
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    if h > 0:
+        return f"{h}h {m}m {s}s"
+    if m > 0:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def fmt_number(n) -> str:
+    n = int(n)
+    if n >= 1_000_000_000:
+        return f"{n/1_000_000_000:.2f}B"
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n/1_000:.1f}K"
+    return str(n)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HTML GENERATION
+# ─────────────────────────────────────────────────────────────────────────────
+def serialize_log(log: dict) -> dict:
+    """Convert a log dict (combined or hour) to JSON-safe form."""
+    stats = log["stats"]
+    def col(name):
+        return stats[name].tolist() if name in stats.columns and not stats.empty else []
+    def col_numeric(name):
+        if name not in stats.columns or stats.empty:
+            return []
+        return pd.to_numeric(stats[name], errors="coerce").tolist()
+
+    return {
+        "label":          log["label"],
+        "summary":        log["summary"],
+        "tile_summaries": log["tile_summaries"],
+        "stats": {
+            "timestamps":     [t.isoformat() for t in stats["Timestamp"].tolist()] if not stats.empty else [],
+            "honey":          col("TotalHoney"),
+            "hps":            col("HPS"),
+            "current_hps":    col_numeric("CurrentHPS"),
+            "pps":            col("PPS"),
+            "current_pps":    col_numeric("CurrentPPS"),
+            "capacity":       col("Capacity"),
+            "pollen":         col("Pollen"),
+            "converting":     col("Converting"),
+            "field":          col("Field"),
+            "balloon_pollen": col_numeric("BalloonPollen"),
         }
     }
-end
-
-local Fields = {
-    ["Pine Tree Forest"]  = { center=Vector3.new(-330,70,-190), bounds={x1=-375.75,x2=-284.05,z1=-251.95,z2=-128.05} },
-    ["Sunflower Field"]   = calcField(Vector3.new(-172.129,3.997,240.270),  Vector3.new(-252.242,3.997,108.677)),
-    ["Dandelion Field"]   = calcField(Vector3.new(-103.944,3.997,183.925),  Vector3.new(39.818,3.997,255.512)),
-    ["Clover Field"]      = calcField(Vector3.new(104.108,33.498,136.491),  Vector3.new(207.439,33.498,250.944)),
-    ["Blue Flower Field"] = calcField(Vector3.new(60.214,3.997,128.230),    Vector3.new(231.783,3.997,64.574)),
-    ["Bamboo Field"]      = calcField(Vector3.new(207.705,19.998,-63.421),  Vector3.new(52.312,19.998,7.943)),
-    ["Spider Field"]      = calcField(Vector3.new(12.027,19.998,36.113),    Vector3.new(-98.953,19.998,-63.378)),
-    ["Strawberry Field"]  = calcField(Vector3.new(-137.164,19.998,39.613),  Vector3.new(-222.992,19.998,-63.411)),
-    ["Rose Field"]        = calcField(Vector3.new(-267.982,19.480,168.147), Vector3.new(-392.378,19.480,88.540)),
-    ["Cactus Field"]      = calcField(Vector3.new(-252.308,67.790,-139.652),Vector3.new(-124.002,67.819,-68.288)),
-    ["Pumpkin Patch"]     = calcField(Vector3.new(-255.686,67.753,-152.540),Vector3.new(-124.199,67.425,-219.453)),
-    ["Mountain Top"]      = calcField(Vector3.new(28.013,175.982,-111.858), Vector3.new(123.606,175.924,-223.915)),
-    ["Pineapple Patch"]   = calcField(Vector3.new(189.510,67.998,-164.074), Vector3.new(319.320,67.998,-254.283)),
-}
-local FieldOrder = {
-    "Pine Tree Forest","Sunflower Field","Dandelion Field","Clover Field",
-    "Blue Flower Field","Bamboo Field","Spider Field","Strawberry Field",
-    "Rose Field","Cactus Field","Pumpkin Patch","Mountain Top","Pineapple Patch"
-}
-
-local Boosters = {
-    ["Blue Field Booster"]  = { pos=Vector3.new(272,59,84),      collectibles=false, time=2700  },
-    ["Wealth Clock"]        = { pos=Vector3.new(330,50,191),     collectibles=false, time=3600  },
-    ["Stockings"]           = { pos=Vector3.new(232,38,232),     collectibles=true,  time=3600  },
-    ["Onett"]               = { pos=Vector3.new(34,236,-512),    collectibles=true,  time=28800 },
-    ["Glue Dispenser"]      = { pos=Vector3.new(270,25258,-722), collectibles=false, time=79200 },
-    ["Gingerbread House"]   = { pos=Vector3.new(-201,6,96),      collectibles=false, time=7200  },
-    ["Memory Match"]        = { pos=Vector3.new(137,69,-95),     collectibles=false, time=7200,  isMM=true },
-    ["Mega Memory Match"]   = { pos=Vector3.new(-428,70,-53),    collectibles=false, time=14400, isMM=true },
-    ["Night Memory Match"]  = { pos=Vector3.new(-17,312,-270),   collectibles=false, time=28800, isMM=true },
-    ["Extreme Memory Match"]= { pos=Vector3.new(-403,111,545),   collectibles=false, time=28800, isMM=true },
-}
-local BoosterOrder = {
-    "Blue Field Booster","Wealth Clock","Stockings","Gingerbread House",
-    "Memory Match","Mega Memory Match","Night Memory Match","Extreme Memory Match",
-    "Onett","Glue Dispenser"
-}
-
--- ============================================================
--- 2. STATE
--- ============================================================
--- Farming
-local isFarming          = false
-local currentField       = "Pine Tree Forest"
-local sprinklerField     = ""
-
--- Honey conversion
-local isConverting       = false
-local lastHoneyEPress    = 0
-local lastEmptied        = tick()
-local fullBagTime        = 0
-local waitingForBees     = false
-local quickRefill        = 0
-
--- Balloon bail
-local balloonBailPending = false
-local ignoreBalloonever  = false
-local ignoreBalloonUntil = 0
-
--- Boosters
-local boosterQueue       = {}
-local boosterPermaIgnore = {}
-local isCheckingBoosters = false
-local boosterScanDone    = false
-local activeBooster      = false
-
--- Memory Match
-local isSolvingMM        = false
-local activeMM           = nil
-local mmBoardGoneAt      = 0
-
--- Field movement
-local warnDisks          = { queue={}, processing=false }
-local permaIgnore        = {}
-local firstAttemptTimes  = {}
-local crosshairBlacklist = {}
-local crosshairSeen      = {}
-local currentTarget      = nil
-local currentTargetType  = nil
-local currentOvershootPos= nil   -- calculated ONCE when target is assigned, never updated
-local dismissedTokens    = {}    -- part -> tick() when dismissed (10s timed ignore)
-local wanderPos          = nil
-local wanderTime         = 0
-local lastInField        = tick()
-local lastHRPPos         = nil
-
--- Blooms & Petals
-local collectBlooms      = true
-local collectedPetals    = {}
-local knownBloomPos      = {}
-
--- Stats
-local totalPollen        = 0
-local lastPollenRaw      = LocalPlayer.CoreStats.Pollen.Value
-local sessionStart       = tick()
-local sessionHoney       = LocalPlayer.CoreStats.Honey.Value
-local intervalStart      = tick()
-local intervalHoney      = LocalPlayer.CoreStats.Honey.Value
-local showInterval       = false
-local totalMMRewards     = {}
-local assetNameCache     = {}
-
--- Rolling current-rate window (10s)
-local RATE_WINDOW        = 10
-local rateHoneyHistory   = {}   -- {tick, honey} pairs
-local ratePollenHistory  = {}   -- {tick, pollen} pairs
-
--- ── Logging / CSV ──────────────────────────────────────────
-local SAVE_INTERVAL     = 15
-local LOG_ROOT          = "BSSLogs"
-local ASSETS_DIR        = LOG_ROOT.."/Assets"
-local statsBuffer       = {}
-local tilesBuffer       = {}
-local lastSaveTime      = tick()
-local hourRotateTime    = tick()
-local currentStatsFile  = ""
-local currentTilesFile  = ""
-
--- Capacity filter
-local lastValidCapacity  = 0   -- set properly on farming start; 0 triggers auto-init
-
--- Tile state: no whitelist — track every tile seen
-local tileStates     = {}   -- assetId -> multiplier currently active
-local assetImageDone = {}   -- assetId -> true once image download queued
-
--- Balloon logging
-local balloonPollenNow   = -1   -- current value this tick (-1 = not found)
-
--- ── Folder helpers ──────────────────────────────────────────
-local function ensureDir(path)
-    if not isfolder(path) then makefolder(path) end
-end
-
-local function nextSessionFolder()
-    ensureDir(LOG_ROOT)
-    ensureDir(ASSETS_DIR)
-    local n = 1
-    while isfolder(LOG_ROOT.."/Session "..n) do n = n + 1 end
-    local path = LOG_ROOT.."/Session "..n
-    makefolder(path)
-    return path
-end
-
-local sessionFolder = ""   -- set fresh each time farming starts
-
-local function makeLogFilename(tag)
-    local d = os.date("*t")
-    return string.format("%s/%s_%04d-%02d-%02d_%02dh.csv",
-        sessionFolder, tag, d.year, d.month, d.day, d.hour)
-end
-
-local function openNewFiles()
-    currentStatsFile = makeLogFilename("stats")
-    currentTilesFile = makeLogFilename("tiles")
-    if not isfile(currentStatsFile) then
-        writefile(currentStatsFile,
-            "Timestamp,TotalHoney,HPS,CurrentHPS,Pollen,PPS,CurrentPPS,Capacity,Field,Converting,BalloonPollen\n")
-    end
-    if not isfile(currentTilesFile) then
-        writefile(currentTilesFile,
-            "Timestamp,AssetID,AssetName,Multiplier,State\n")
-    end
-end
--- openNewFiles() is called inside the start button handler instead
-
-local function flushCSV()
-    if currentStatsFile == "" then return end   -- files not opened yet
-    if #statsBuffer > 0 then
-        appendfile(currentStatsFile, table.concat(statsBuffer, "\n").."\n")
-        statsBuffer = {}
-    end
-    if currentTilesFile == "" then return end
-    if #tilesBuffer > 0 then
-        appendfile(currentTilesFile, table.concat(tilesBuffer, "\n").."\n")
-        tilesBuffer = {}
-    end
-end
-
--- ============================================================
--- 3. UTILITIES
--- ============================================================
--- UI references (populated by createUI — declared here as upvalues
--- so booster dispatch and stats loop can reference them before createUI runs)
-local UI            = {}
-local boosterLabels = {}
-
-local function fmt(n)
-    return tostring(math.floor(n)):reverse():gsub("%d%d%d","%1,"):reverse():gsub("^,","")
-end
-
-local function getChar()
-    local c = LocalPlayer.Character
-    return c, c and c:FindFirstChild("HumanoidRootPart"), c and c:FindFirstChild("Humanoid")
-end
-
-local function tpTo(pos)
-    local _, hrp = getChar()
-    if not hrp then return end
-    hrp.Velocity    = Vector3.zero
-    hrp.RotVelocity = Vector3.zero
-    hrp.CFrame      = CFrame.new(pos)
-end
-
--- FIX: unanchor now properly restores WalkSpeed
-local function anchor()
-    local _, hrp, hum = getChar()
-    if hum then
-        hum.WalkSpeed   = 0
-        hum.WalkToPoint = hrp and hrp.Position or Vector3.zero
-    end
-end
-
-local function unanchor()
-    local _, hrp, hum = getChar()
-    if hum then
-        hum.WalkSpeed   = 16
-        hum.WalkToPoint = hrp and hrp.Position or Vector3.zero
-    end
-end
-
-local function stepToward(hrp, hum, targetPos, threshold)
-    threshold = threshold or 1.5
-    local diff = targetPos - hrp.Position
-    diff = Vector3.new(diff.X, 0, diff.Z)
-    if diff.Magnitude <= threshold then
-        hum.WalkToPoint = hrp.Position
-        return true
-    end
-    hum.WalkToPoint = targetPos
-    return false
-end
-
-local function pressE()
-    VInput:SendKeyEvent(true,  Enum.KeyCode.E, false, game)
-    task.wait(0.1)
-    VInput:SendKeyEvent(false, Enum.KeyCode.E, false, game)
-end
-
-local function fieldBounds()  return Fields[currentField].bounds end
-local function fieldCenter()  return Fields[currentField].center  end
-
-local function inField(pos)
-    local b = fieldBounds()
-    return pos.X>=b.x1 and pos.X<=b.x2 and pos.Z>=b.z1 and pos.Z<=b.z2
-end
-
-local function getHivePos()
-    local h = workspace:FindFirstChild("Honeycombs")
-    if not h then return nil end
-    for _, v in ipairs(h:GetChildren()) do
-        local o = v:FindFirstChild("Display") and v.Display:FindFirstChild("Gui")
-              and v.Display.Gui:FindFirstChild("Frame") and v.Display.Gui.Frame:FindFirstChild("OwnerName")
-        if o and o.Text == LocalPlayer.Name then
-            return v.Display.Position - Vector3.new(0,25,7)
-        end
-    end
-    return nil
-end
-
--- Read pollen stored in the nearest BalloonBody to the hive teleport position.
--- Returns integer value, or -1 if no balloon within radius or any error occurs.
-local BALLOON_SEARCH_RADIUS = 30
-local function readNearestBalloon()
-    local ok0, hPos = pcall(getHivePos)
-    if not ok0 or not hPos then return -1 end
-
-    local best, bestDist = nil, BALLOON_SEARCH_RADIUS
-    local okD, desc = pcall(function() return workspace:GetDescendants() end)
-    if not okD or not desc then return -1 end
-
-    for _, obj in ipairs(desc) do
-        if obj and obj.Parent and obj.Name == "BalloonBody" and obj:IsA("BasePart") then
-            local okP, d = pcall(function() return (obj.Position - hPos).Magnitude end)
-            if okP and d and d < bestDist then
-                bestDist = d
-                best = obj
-            end
-        end
-    end
-    if not best or not best.Parent then return -1 end
-
-    local okT, val = pcall(function()
-        return best.GuiAttach.Gui.Bar.TextLabel.Text
-    end)
-    if not okT or not val or val == "" then return -1 end
-
-    return tonumber(val:gsub("[,%s]", "")) or -1
-end
-
-local function parseCooldown(txt)
-    local h,m,s = txt:match("(%d+):(%d%d):(%d%d)")
-    if h then return tonumber(h)*3600 + tonumber(m)*60 + tonumber(s) end
-    local m2,s2 = txt:match("(%d+):(%d%d)")
-    if m2 then return tonumber(m2)*60 + tonumber(s2) end
-    return nil
-end
-
-local function getAssetName(id)
-    if assetNameCache[id] then return assetNameCache[id] end
-    local ok, name = pcall(function()
-        return MktService:GetProductInfo(tonumber(id), Enum.InfoType.Asset).Name
-    end)
-    local n = ok and name or ("ID:"..tostring(id))
-    assetNameCache[id] = n
-    return n
-end
-
--- ── Asset image downloader ───────────────────────────────────
--- Uses Roblox thumbnail API → CDN URL → writefile.
--- Mirrors the working BSS Asset Catcher script exactly.
--- Files saved as: BSSLogs/Assets/AssetName_ID.png
-local assetIdQueue      = {}
-local assetQueueRunning = false
-
-local function sanitizeFileName(name)
-    if not name then return "Unknown" end
-    return name:gsub('[%c%p%s]', "_")
-end
-
-local function downloadAssetImage(id, name)
-    local cleanName = sanitizeFileName(name)
-    local path = ASSETS_DIR.."/"..cleanName.."_"..id..".png"
-
-    -- If file exists but is suspiciously small (≤879 bytes = Roblox placeholder),
-    -- delete it so we re-download properly
-    if isfile(path) then
-        local ok, existing = pcall(readfile, path)
-        if ok and existing and #existing <= 879 then
-            pcall(delfile, path)   -- delete the bad file
-        else
-            return true   -- file looks good, skip
-        end
-    end
-
-    local thumbUrl = string.format(
-        "https://thumbnails.roblox.com/v1/assets?assetIds=%s&size=420x420&format=Png&isCircular=false", id)
-
-    local ok1, res1 = pcall(request, { Url=thumbUrl, Method="GET" })
-    if not ok1 or not res1 or res1.StatusCode ~= 200 then return false end
-
-    local ok2, decoded = pcall(function()
-        return HttpService:JSONDecode(res1.Body)
-    end)
-    if not ok2 or not decoded or not decoded.data or not decoded.data[1] then return false end
-
-    local imgUrl = decoded.data[1].imageUrl
-    if not imgUrl then return false end
-
-    local ok3, res3 = pcall(request, { Url=imgUrl, Method="GET" })
-    if not ok3 or not res3 or res3.StatusCode ~= 200 then return false end
-
-    -- Sanity check: reject placeholder responses
-    if #res3.Body <= 879 then return false end
-
-    writefile(path, res3.Body)
-    return true
-end
-
-local function processAssetQueue()
-    if assetQueueRunning then return end
-    assetQueueRunning = true
-    task.spawn(function()
-        while #assetIdQueue > 0 do
-            local item  = table.remove(assetIdQueue, 1)
-            local name  = item.name or getAssetName(item.id)
-            local ok    = downloadAssetImage(item.id, name)
-            if ok then
-                print("[BSS Assets] Saved: "..name.." ("..item.id..")")
-            else
-                -- Clear the done flag so it retries when the tile appears again
-                assetImageDone[item.id] = nil
-                warn("[BSS Assets] Failed: "..item.id)
-            end
-            task.wait(0.5)
-        end
-        assetQueueRunning = false
-    end)
-end
-
-local function ensureAssetImage(assetId, assetName)
-    if assetImageDone[assetId] then return end
-    assetImageDone[assetId] = true
-    table.insert(assetIdQueue, { id=tostring(assetId), name=assetName })
-    processAssetQueue()
-end
-
-local function fmtTime(secs)
-    local h = math.floor(secs/3600)
-    local m = math.floor((secs%3600)/60)
-    if h > 0 then return h.."h "..m.."m" end
-    return m.."m"
-end
-
-local function sendWebhook(body)
-    pcall(function()
-        local req = (syn and syn.request) or (http and http.request) or request
-        req({Url=WEBHOOK, Method="POST", Headers={["Content-Type"]="application/json"}, Body=HttpService:JSONEncode(body)})
-    end)
-end
-
-
--- ============================================================
--- 4. UI
--- ============================================================
-local function createUI()
-    local old = LocalPlayer.PlayerGui:FindFirstChild("BSS_V23_UI")
-    if old then old:Destroy() end
-
-    local sg = Instance.new("ScreenGui", LocalPlayer.PlayerGui)
-    sg.Name = "BSS_V23_UI"; sg.ResetOnSpawn = false
-
-    local main = Instance.new("Frame", sg)
-    main.Size = UDim2.new(0,310,0,400); main.Position = UDim2.new(0.02,0,0.2,0)
-    main.BackgroundColor3 = Color3.fromRGB(12,12,14); main.BorderSizePixel = 0
-    main.Active = true; main.Draggable = true
-    local scale = Instance.new("UIScale", main)
-
-    local top = Instance.new("Frame", main)
-    top.Size = UDim2.new(1,0,0,32); top.BackgroundColor3 = Color3.fromRGB(22,22,28); top.BorderSizePixel=0
-
-    local titleLbl = Instance.new("TextLabel", top)
-    titleLbl.Size=UDim2.new(0.6,0,1,0); titleLbl.Position=UDim2.new(0.02,0,0,0)
-    titleLbl.Text="BSS MASTER V23"; titleLbl.TextColor3=Color3.fromRGB(220,220,255)
-    titleLbl.BackgroundTransparency=1; titleLbl.TextXAlignment=Enum.TextXAlignment.Left
-    titleLbl.Font=Enum.Font.Code; titleLbl.TextSize=15
-
-    local destroyBtn = Instance.new("TextButton", top)
-    destroyBtn.Size=UDim2.new(0.28,0,0.78,0); destroyBtn.Position=UDim2.new(0.70,0,0.11,0)
-    destroyBtn.BackgroundColor3=Color3.fromRGB(180,40,40); destroyBtn.Text="DESTROY"
-    destroyBtn.TextColor3=Color3.new(1,1,1); destroyBtn.Font=Enum.Font.SourceSansBold
-    destroyBtn.TextSize=13; destroyBtn.BorderSizePixel=0
-
-    local tabBar = Instance.new("Frame", main)
-    tabBar.Size=UDim2.new(1,0,0,26); tabBar.Position=UDim2.new(0,0,0,32)
-    tabBar.BackgroundColor3=Color3.fromRGB(18,18,22); tabBar.BorderSizePixel=0
-
-    local content = Instance.new("Frame", main)
-    content.Size=UDim2.new(1,0,1,-58); content.Position=UDim2.new(0,0,0,58)
-    content.BackgroundTransparency=1; content.ClipsDescendants=true
-
-    local tabFrames, tabBtns = {}, {}
-    local tabNames = {"Dash","Stats","Boost","Cfg"}
-
-    local function switchTab(name)
-        for n,f in pairs(tabFrames) do f.Visible=(n==name); f.Active=(n==name) end
-        for n,b in pairs(tabBtns) do
-            b.BackgroundColor3 = (n==name) and Color3.fromRGB(45,45,60) or Color3.fromRGB(18,18,22)
-            b.TextColor3       = (n==name) and Color3.fromRGB(220,220,255) or Color3.fromRGB(130,130,150)
-        end
-    end
-
-    for i,tname in ipairs(tabNames) do
-        local btn = Instance.new("TextButton", tabBar)
-        btn.Size=UDim2.new(0.25,0,1,0); btn.Position=UDim2.new(0.25*(i-1),0,0,0)
-        btn.BackgroundColor3=Color3.fromRGB(18,18,22); btn.BorderSizePixel=0
-        btn.Text=tname; btn.TextColor3=Color3.fromRGB(130,130,150)
-        btn.Font=Enum.Font.SourceSansBold; btn.TextSize=13
-        tabBtns[tname] = btn
-
-        local sf = Instance.new("ScrollingFrame", content)
-        sf.Size=UDim2.new(1,-4,1,-4); sf.Position=UDim2.new(0,2,0,2)
-        sf.BackgroundTransparency=1; sf.ScrollBarThickness=3
-        sf.ScrollBarImageColor3=Color3.fromRGB(80,80,120)
-        sf.Visible=false; sf.Active=false
-        sf.AutomaticCanvasSize=Enum.AutomaticSize.Y; sf.CanvasSize=UDim2.new(0,0,0,0)
-        local lay = Instance.new("UIListLayout", sf)
-        lay.Padding=UDim.new(0,4); lay.SortOrder=Enum.SortOrder.LayoutOrder
-        tabFrames[tname] = sf
-        btn.MouseButton1Click:Connect(function() switchTab(tname) end)
-    end
-
-    local function lbl(parent, text, color, order, h)
-        local l = Instance.new("TextLabel", parent)
-        l.Size=UDim2.new(1,-6,0,h or 20); l.BackgroundTransparency=1
-        l.Text=text; l.TextColor3=color or Color3.new(1,1,1)
-        l.Font=Enum.Font.Code; l.TextSize=13
-        l.TextXAlignment=Enum.TextXAlignment.Left; l.LayoutOrder=order or 0
-        return l
-    end
-    local function btn(parent, text, color, order, h)
-        local b = Instance.new("TextButton", parent)
-        b.Size=UDim2.new(1,-6,0,h or 26); b.BackgroundColor3=color or Color3.fromRGB(40,40,55)
-        b.BorderSizePixel=0; b.Text=text; b.TextColor3=Color3.new(1,1,1)
-        b.Font=Enum.Font.SourceSansBold; b.TextSize=13; b.LayoutOrder=order or 0
-        return b
-    end
-    local function div(parent, order)
-        local d = Instance.new("Frame", parent)
-        d.Size=UDim2.new(1,-6,0,1); d.BackgroundColor3=Color3.fromRGB(45,45,60)
-        d.BorderSizePixel=0; d.LayoutOrder=order or 0
-    end
-
-    -- ── DASH TAB ──
-    local dash = tabFrames["Dash"]
-    local startBtn = btn(dash,"▶  START FARMING",Color3.fromRGB(30,140,60),1,34)
-    div(dash,2)
-    lbl(dash,"  Select Field:",Color3.fromRGB(160,160,200),3)
-
-    local fieldScroll = Instance.new("ScrollingFrame", dash)
-    fieldScroll.Size=UDim2.new(1,-6,0,130); fieldScroll.BackgroundColor3=Color3.fromRGB(18,18,24)
-    fieldScroll.BorderSizePixel=0; fieldScroll.ScrollBarThickness=3
-    fieldScroll.ScrollBarImageColor3=Color3.fromRGB(80,80,120)
-    fieldScroll.AutomaticCanvasSize=Enum.AutomaticSize.Y; fieldScroll.CanvasSize=UDim2.new(0,0,0,0)
-    fieldScroll.LayoutOrder=4
-    local fsLay = Instance.new("UIListLayout", fieldScroll)
-    fsLay.Padding=UDim.new(0,2)
-
-    local fieldBtns = {}
-    local function updateFieldBtns()
-        for fname,fb in pairs(fieldBtns) do
-            fb.BackgroundColor3 = (fname==currentField) and Color3.fromRGB(40,80,40) or Color3.fromRGB(22,22,28)
-            fb.TextColor3       = (fname==currentField) and Color3.fromRGB(150,255,150) or Color3.fromRGB(180,180,200)
-        end
-    end
-    for _,fname in ipairs(FieldOrder) do
-        local fb = Instance.new("TextButton", fieldScroll)
-        fb.Size=UDim2.new(1,-4,0,22); fb.BackgroundColor3=Color3.fromRGB(22,22,28)
-        fb.BorderSizePixel=0; fb.Text="  "..fname
-        fb.TextColor3=Color3.fromRGB(180,180,200); fb.Font=Enum.Font.Code
-        fb.TextSize=12; fb.TextXAlignment=Enum.TextXAlignment.Left
-        fieldBtns[fname] = fb
-        fb.MouseButton1Click:Connect(function()
-            currentField   = fname
-            sprinklerField = ""
-            updateFieldBtns()
-        end)
-    end
-    updateFieldBtns()
-
-    div(dash,5)
-    local statusLbl     = lbl(dash,"  Status: Idle",     Color3.fromRGB(160,160,100),6)
-    local fieldActiveLbl= lbl(dash,"  Field: "..currentField, Color3.fromRGB(140,200,140),7)
-
-    -- ── STATS TAB ──
-    local statsTab = tabFrames["Stats"]
-    local toggleBtn = btn(statsTab,"View: Session Total",Color3.fromRGB(35,55,100),1)
-    div(statsTab,2)
-    local hS  = lbl(statsTab,"  H/s:  0",  Color3.fromRGB(255,220,100),3)
-    local hM  = lbl(statsTab,"  H/m:  0",  Color3.fromRGB(255,220,100),4)
-    local hH  = lbl(statsTab,"  H/h:  0",  Color3.fromRGB(255,220,100),5)
-    div(statsTab,6)
-    local pS  = lbl(statsTab,"  P/s:  0",  Color3.fromRGB(100,200,255),7)
-    local pM  = lbl(statsTab,"  P/m:  0",  Color3.fromRGB(100,200,255),8)
-    local pH  = lbl(statsTab,"  P/h:  0",  Color3.fromRGB(100,200,255),9)
-    div(statsTab,10)
-    local totLbl  = lbl(statsTab,"  Total Honey:  0",Color3.fromRGB(255,200,60),11)
-    local timeLbl = lbl(statsTab,"  Runtime:  00:00:00",nil,12)
-    div(statsTab,13)
-    lbl(statsTab,"  ── MM Rewards ──",Color3.fromRGB(255,255,80),14)
-    local mmLbl = lbl(statsTab,"  No rewards yet.",Color3.fromRGB(200,200,200),15,200)
-    mmLbl.TextWrapped=true; mmLbl.TextYAlignment=Enum.TextYAlignment.Top
-
-    toggleBtn.MouseButton1Click:Connect(function()
-        showInterval = not showInterval
-        toggleBtn.Text = showInterval and "View: Since Last Start" or "View: Session Total"
-        intervalStart = tick(); intervalHoney = LocalPlayer.CoreStats.Honey.Value
-    end)
-
-    UI = { hS=hS,hM=hM,hH=hH,pS=pS,pM=pM,pH=pH,total=totLbl,time=timeLbl,mm=mmLbl,
-           status=statusLbl, fieldLbl=fieldActiveLbl }
-
-    -- ── BOOST TAB ──
-    local boostTab = tabFrames["Boost"]
-    lbl(boostTab,"  ── Booster Status ──",Color3.fromRGB(255,220,100),1)
-    div(boostTab,2)
-    for i,bName in ipairs(BoosterOrder) do
-        boosterLabels[bName] = lbl(boostTab,"  "..bName..":  Unknown",Color3.fromRGB(160,160,180),i+2)
-    end
-
-    -- ── CFG TAB ──
-    local cfgTab = tabFrames["Cfg"]
-    lbl(cfgTab,"  ── Balloon ──",Color3.fromRGB(200,200,255),1)
-    local balloonForeverBtn = btn(cfgTab,"Ignore Balloon: OFF (claim it)",Color3.fromRGB(30,80,30),2)
-    lbl(cfgTab,"  Ignore for duration (e.g. 30m, 2h):",Color3.fromRGB(160,160,180),3)
-    local balloonTimeBox = Instance.new("TextBox", cfgTab)
-    balloonTimeBox.Size=UDim2.new(1,-6,0,26); balloonTimeBox.BackgroundColor3=Color3.fromRGB(22,22,30)
-    balloonTimeBox.PlaceholderText="e.g. 30m, 2h ..."; balloonTimeBox.Text=""
-    balloonTimeBox.TextColor3=Color3.fromRGB(200,200,220); balloonTimeBox.PlaceholderColor3=Color3.fromRGB(90,90,110)
-    balloonTimeBox.Font=Enum.Font.Code; balloonTimeBox.TextSize=12; balloonTimeBox.BorderSizePixel=0
-    balloonTimeBox.LayoutOrder=4
-    local balloonStatusLbl = lbl(cfgTab,"  Timed ignore: inactive",Color3.fromRGB(120,180,120),5)
-    div(cfgTab,6)
-    lbl(cfgTab,"  ── Blooms & Petals ──",Color3.fromRGB(200,200,255),7)
-    local bloomBtn = btn(cfgTab,"Collect Blooms & Petals: ON",Color3.fromRGB(30,80,30),8)
-    div(cfgTab,9)
-    lbl(cfgTab,"  ── UI Scale ──",Color3.fromRGB(200,200,255),10)
-    local scaleBox = Instance.new("TextBox", cfgTab)
-    scaleBox.Size=UDim2.new(1,-6,0,26); scaleBox.BackgroundColor3=Color3.fromRGB(22,22,30)
-    scaleBox.Text="1.0"; scaleBox.PlaceholderText="Scale (0.4–2.5)"
-    scaleBox.TextColor3=Color3.fromRGB(200,200,220); scaleBox.Font=Enum.Font.Code
-    scaleBox.TextSize=12; scaleBox.BorderSizePixel=0; scaleBox.LayoutOrder=11
-
-    bloomBtn.MouseButton1Click:Connect(function()
-        collectBlooms = not collectBlooms
-        bloomBtn.Text = collectBlooms and "Collect Blooms & Petals: ON" or "Collect Blooms & Petals: OFF"
-        bloomBtn.BackgroundColor3 = collectBlooms and Color3.fromRGB(30,80,30) or Color3.fromRGB(80,30,30)
-    end)
-    balloonForeverBtn.MouseButton1Click:Connect(function()
-        ignoreBalloonever = not ignoreBalloonever
-        balloonForeverBtn.Text = ignoreBalloonever and "Ignore Balloon: ON (skip it)" or "Ignore Balloon: OFF (claim it)"
-        balloonForeverBtn.BackgroundColor3 = ignoreBalloonever and Color3.fromRGB(80,30,30) or Color3.fromRGB(30,80,30)
-    end)
-    balloonTimeBox.FocusLost:Connect(function()
-        local txt = balloonTimeBox.Text:lower():gsub("%s","")
-        local num = tonumber(txt:match("%d+"))
-        if num then
-            local secs = num * (txt:find("h") and 3600 or 60)
-            ignoreBalloonUntil = tick() + secs
-            balloonStatusLbl.Text = "  Ignoring until: "..os.date("%H:%M:%S", os.time()+secs)
-            balloonStatusLbl.TextColor3 = Color3.fromRGB(100,220,100)
-        end
-    end)
-    scaleBox.FocusLost:Connect(function()
-        local v = tonumber(scaleBox.Text:match("[%d%.]+"))
-        if v then scale.Scale = math.clamp(v,0.4,2.5) end
-    end)
-
-    startBtn.MouseButton1Click:Connect(function()
-        isFarming = not isFarming
-        if isFarming then
-            startBtn.Text="■  STOP FARMING"; startBtn.BackgroundColor3=Color3.fromRGB(160,40,40)
-            statusLbl.Text="  Status: Farming"
-            intervalStart=tick(); intervalHoney=LocalPlayer.CoreStats.Honey.Value
-
-            -- Equip Diamond Mask immediately when farming starts
-            RepStorage.Events.ItemPackageEvent:InvokeServer("Equip",{["Category"]="Accessory",["Type"]="Diamond Mask"})
-
-            balloonPollenNow  = -1
-            rateHoneyHistory  = {}
-            ratePollenHistory = {}
-
-            -- New session every time farming starts
-            -- Open files FIRST so flushCSV has valid paths
-            statsBuffer       = {}
-            tilesBuffer       = {}
-            tileStates        = {}
-            assetImageDone    = {}
-            sessionFolder     = nextSessionFolder()
-            hourRotateTime    = tick()
-            lastSaveTime      = tick()
-            lastValidCapacity = LocalPlayer.CoreStats.Capacity.Value
-            openNewFiles()
-            if not isCheckingBoosters and not boosterScanDone then
-                isCheckingBoosters = true
-                task.spawn(function()
-                    for _, name in ipairs(BoosterOrder) do
-                        if boosterPermaIgnore[name] then continue end
-                        tpTo(Boosters[name].pos)
-                        anchor()
-                        task.wait(1.8)
-
-                        local activateBtn = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui")
-                                        and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
-                        local btnText = activateBtn and activateBtn:FindFirstChild("TextBox") and activateBtn.TextBox.Text or ""
-                        local btnBG   = activateBtn and activateBtn.BackgroundColor3 or Color3.fromRGB(0,0,0)
-                        local r = math.round(btnBG.R * 255)
-                        local g = math.round(btnBG.G * 255)
-                        local b = math.round(btnBG.B * 255)
-                        local cd = parseCooldown(btnText)
-
-                        if cd and cd > 0 then
-                            -- Has cooldown → log and schedule
-                            if boosterLabels[name] then
-                                boosterLabels[name].Text      = "  "..name..":  ⏳ "..fmtTime(cd)
-                                boosterLabels[name].TextColor3 = Color3.fromRGB(200,180,60)
-                            end
-                            task.delay(cd, function()
-                                if not boosterPermaIgnore[name] then
-                                    table.insert(boosterQueue, name)
-                                    if boosterLabels[name] then
-                                        boosterLabels[name].Text      = "  "..name..":  ✅ READY"
-                                        boosterLabels[name].TextColor3 = Color3.fromRGB(80,220,80)
-                                    end
-                                end
-                            end)
-
-                        elseif r >= 180 and g <= 60 and b <= 60 then
-                            -- Red → permanently unavailable
-                            boosterPermaIgnore[name] = true
-                            if boosterLabels[name] then
-                                boosterLabels[name].Text      = "  "..name..":  [Unavailable]"
-                                boosterLabels[name].TextColor3 = Color3.fromRGB(120,60,60)
-                            end
-
-                        else
-                            -- Ready (includes spend-honey prompts — just queue it)
-                            table.insert(boosterQueue, name)
-                            if boosterLabels[name] then
-                                boosterLabels[name].Text      = "  "..name..":  ✅ READY"
-                                boosterLabels[name].TextColor3 = Color3.fromRGB(80,220,80)
-                            end
-                        end
-                    end
-                    unanchor()
-                    isCheckingBoosters = false
-                    boosterScanDone    = true
-                    tpTo(fieldCenter())
-                end)
-            end
-        else
-            startBtn.Text="▶  START FARMING"; startBtn.BackgroundColor3=Color3.fromRGB(30,140,60)
-            statusLbl.Text="  Status: Idle"
-            unanchor()
-            flushCSV()   -- save anything buffered before session ends
-        end
-    end)
-
-    destroyBtn.MouseButton1Click:Connect(function()
-        _G.Running = false
-        unanchor()
-        for _,c in pairs(connections) do c:Disconnect() end
-        sg:Destroy()
-        print("[BSS V23] Destroyed.")
-    end)
-
-    switchTab("Dash")
-end
-createUI()
-
--- ============================================================
--- 5. POLLEN WATCHER
--- ============================================================
-table.insert(connections, RunService.Heartbeat:Connect(function()
-    if not _G.Running then return end
-    local cur = LocalPlayer.CoreStats.Pollen.Value
-    if cur > lastPollenRaw then totalPollen = totalPollen + (cur - lastPollenRaw) end
-    lastPollenRaw = cur
-end))
-
--- ============================================================
--- 6. MEMORY LEAK CLEANUP
--- ============================================================
-task.spawn(function()
-    while _G.Running do
-        task.wait(30)
-        for k in pairs(permaIgnore)        do if typeof(k)=="Instance" and not k.Parent then permaIgnore[k]=nil end end
-        for k in pairs(firstAttemptTimes)  do if typeof(k)=="Instance" and not k.Parent then firstAttemptTimes[k]=nil end end
-        for k in pairs(crosshairBlacklist) do if typeof(k)=="Instance" and not k.Parent then crosshairBlacklist[k]=nil end end
-        for k in pairs(crosshairSeen)      do if typeof(k)=="Instance" and not k.Parent then crosshairSeen[k]=nil end end
-        for k,t in pairs(dismissedTokens)  do if tick()-t > 10 then dismissedTokens[k]=nil end end
-    end
-end)
-
--- ============================================================
--- 7. MEMORY MATCH SOLVER
--- ============================================================
-task.spawn(function()
-    local KnownCards, SolvedSlots, CurrentBoard = {}, {}, nil
-    local OrderCounter = 0
-    local CurrentWinnings = {}
-    local BACK_ID = "http://www.roblox.com/asset/?id=3690982763"
-
-    local MMLogic = {
-        ["Memory Match"]        = { Ignore={["2028574353"]=true,["1471882621"]=true,["2863122826"]=true,["8277901755"]=true}, ListA={["1674871631_x5"]=true,["2529092020"]=true,["2863468407"]=true,["2584584968"]=true,["2545746569"]=true}, ListB={["2504978518"]=true} },
-        ["Mega Memory Match"]   = { Ignore={["2028574353"]=true,["1471882621"]=true,["2863122826"]=true,["8277901755"]=true,["3012679515"]=true,["3030407727"]=true}, ListA={["1674871631_x3"]=true,["2863468407_x3"]=true,["2545746569"]=true,["2584584968"]=true,["2542899798"]=true,["15482935937"]=true}, ListB={["2504978518"]=true,["2319943273"]=true,["1674871631_x10"]=true} },
-        ["Night Memory Match"]  = { Ignore={["2028574353"]=true,["8277901755"]=true,["2863122826"]=true}, ListA={["2504978518"]=true,["2314214749"]=true,["2319943273"]=true}, ListB={["2676671613"]=true,["2028603146"]=true} },
-        ["Extreme Memory Match"]= { Ignore={["2028574353"]=true,["1471882621"]=true,["1838129169"]=true,["8277901755"]=true}, ListA={["2319943273"]=true,["2542899798"]=true,["2542899798_x5"]=true,["3835877932"]=true}, ListB={["1471850677"]=true,["1471849394"]=true,["15529301204"]=true,["2028603146"]=true} },
-    }
-
-    local function extractCount(t) return t and t:lower():match("x%d+") or "" end
-
-    local function catOf(mtype, id, cnt)
-        local l = MMLogic[mtype] or MMLogic["Memory Match"]
-        local sig = id..(cnt~="" and "_"..cnt or "")
-        if l.Ignore[sig] or l.Ignore[id] then return "Ignore" end
-        if l.ListB[sig]  or l.ListB[id]  then return "ListB"  end
-        if l.ListA[sig]  or l.ListA[id]  then return "ListA"  end
-        return "Common"
-    end
-
-    local function clickSlot(slot)
-        for _,d in pairs(slot:GetDescendants()) do
-            if (d:IsA("ImageButton") or d:IsA("TextButton")) and getconnections then
-                for _,c in pairs(getconnections(d.MouseButton1Click)) do c:Fire() end
-                for _,c in pairs(getconnections(d.Activated))         do c:Fire() end
-            end
-        end
-    end
-
-    local function clickAndRead(slot)
-        local img = nil
-        for _,d in pairs(slot:GetDescendants()) do
-            if d.Name=="ObjImage" and d:IsA("ImageLabel") and d.Image==BACK_ID then img=d; break end
-        end
-        clickSlot(slot)
-        if img then
-            local t=0; while img.Image==BACK_ID and t<3 do task.wait(0.1); t+=0.1 end
-            if img.Image~=BACK_ID then
-                local tc=img:FindFirstChild("TextCount")
-                return img.Image:match("%d+"), (tc and extractCount(tc.Text) or "")
-            end
-        else
-            task.wait(0.5)
-            for _,d in pairs(slot:GetDescendants()) do
-                if d.Name=="ObjImage" and d:IsA("ImageLabel") and d.Image:match("rbxassetid://") then
-                    local tc=d:FindFirstChild("TextCount")
-                    return d.Image:match("%d+"), (tc and extractCount(tc.Text) or "")
-                end
-            end
-        end
-        return nil,""
-    end
-
-    local function getBoard()
-        local sg2 = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui")
-        local ml  = sg2 and sg2:FindFirstChild("MinigameLayer")
-        if not ml then return nil end
-        for _,child in pairs(ml:GetChildren()) do
-            if child.Name=="MemoryMatchFrame" then
-                local lbl2 = child:FindFirstChild("ChancesFrame") and child.ChancesFrame:FindFirstChild("CountLabel")
-                if lbl2 then
-                    local n = tonumber(lbl2.Text:match("%d+")) or tonumber(lbl2.ContentText and lbl2.ContentText:match("%d+")) or 0
-                    if n >= 1 then return child end
-                end
-            end
-        end
-        return nil
-    end
-
-    local function nextAction(mtype, slots)
-        local bMatch, aMatch, cMatch = {},{},{}
-        local sigMap = {}
-        for slot,data in pairs(KnownCards) do
-            if not SolvedSlots[slot] and data.cat~="Ignore" then
-                if sigMap[data.sig] then
-                    local pair = {c1=sigMap[data.sig], c2=slot, order=KnownCards[sigMap[data.sig]].orderSeen}
-                    if     data.cat=="ListB" then table.insert(bMatch,pair)
-                    elseif data.cat=="ListA" then table.insert(aMatch,pair)
-                    else                          table.insert(cMatch,pair) end
-                else sigMap[data.sig]=slot end
-            end
-        end
-        local srt = function(t) table.sort(t,function(a,b) return a.order<b.order end) end
-        srt(bMatch); srt(aMatch); srt(cMatch)
-        if #bMatch>0 then return "Match",bMatch[1].c1,bMatch[1].c2 end
-        if #aMatch>0 then return "Match",aMatch[1].c1,aMatch[1].c2 end
-
-        local unk={}
-        for _,s in ipairs(slots) do if not KnownCards[s] then table.insert(unk,s) end end
-        if #unk>=2 then
-            local u1=table.remove(unk,math.random(1,#unk))
-            local u2=table.remove(unk,math.random(1,#unk))
-            return "Explore",u1,u2
-        elseif #unk==1 then
-            local u1=unk[1]; local anc
-            for s,d in pairs(KnownCards) do if not SolvedSlots[s] and d.cat~="Ignore" then anc=s; break end end
-            if not anc then anc=(slots[1]==u1) and slots[2] or slots[1] end
-            return "Explore",u1,anc
-        end
-        if #cMatch>0 then return "Match",cMatch[1].c1,cMatch[1].c2 end
-        return "Random",slots[1],slots[2]
-    end
-
-    local function doTurn(mtype, action, s1, s2)
-        if action=="Match" or action=="Random" then
-            local idA,ctA = clickAndRead(s1)
-            task.wait(0.2)
-            clickSlot(s2)
-            SolvedSlots[s1]=true; SolvedSlots[s2]=true
-            if idA then table.insert(CurrentWinnings,{id=idA,count=ctA}) end
-            task.wait(1.2)
-        elseif action=="Explore" then
-            local id1,cnt1 = clickAndRead(s1)
-            if id1 then
-                OrderCounter+=1
-                local sig1=id1..(cnt1~="" and "_"..cnt1 or "")
-                KnownCards[s1]={id=id1,count=cnt1,sig=sig1,cat=catOf(mtype,id1,cnt1),orderSeen=OrderCounter}
-                local pair
-                if KnownCards[s1].cat~="Ignore" then
-                    for s,d in pairs(KnownCards) do if s~=s1 and not SolvedSlots[s] and d.sig==sig1 then pair=s; break end end
-                end
-                if pair then
-                    clickSlot(pair); SolvedSlots[s1]=true; SolvedSlots[pair]=true
-                    table.insert(CurrentWinnings,{id=id1,count=cnt1}); task.wait(1.2)
-                else
-                    local id2,cnt2=clickAndRead(s2)
-                    if id2 then
-                        OrderCounter+=1
-                        local sig2=id2..(cnt2~="" and "_"..cnt2 or "")
-                        KnownCards[s2]={id=id2,count=cnt2,sig=sig2,cat=catOf(mtype,id2,cnt2),orderSeen=OrderCounter}
-                        if sig1==sig2 and KnownCards[s2].cat~="Ignore" then
-                            SolvedSlots[s1]=true; SolvedSlots[s2]=true
-                            table.insert(CurrentWinnings,{id=id2,count=cnt2})
-                        end
-                    end
-                    task.wait(1.2)
-                end
-            else clickSlot(s2); task.wait(1.2) end
-        end
-    end
-
-    local function onMMDone()
-        if #CurrentWinnings == 0 then return end
-        local fields = {}
-        for _,w in ipairs(CurrentWinnings) do
-            local name = getAssetName(w.id)
-            local amt  = w.count~="" and w.count or "x1"
-            table.insert(fields,{name=name,value="Amount: "..amt,inline=true})
-            local cnt = tonumber(amt:match("%d+")) or 1
-            totalMMRewards[w.id] = (totalMMRewards[w.id] or 0) + cnt
-        end
-        sendWebhook({embeds={{title="🎉 "..(activeMM or "MM").." Winnings",color=16776960,fields=fields,timestamp=os.date("!%Y-%m-%dT%H:%M:%SZ")}}})
-    end
-
-    while _G.Running do
-        task.wait(0.1)
-        local board = getBoard()
-
-        if not board then
-            if isSolvingMM then
-                if mmBoardGoneAt == 0 then mmBoardGoneAt = tick() end
-                if tick() - mmBoardGoneAt >= 3 then
-                    isSolvingMM = false
-                    onMMDone()
-                    if activeMM and Boosters[activeMM] then
-                        local bName = activeMM
-                        local bTime = Boosters[bName].time
-                        task.delay(bTime, function()
-                            if not boosterPermaIgnore[bName] then
-                                table.insert(boosterQueue, bName)
-                                if boosterLabels[bName] then
-                                    boosterLabels[bName].Text      = "  "..bName..":  ✅ READY"
-                                    boosterLabels[bName].TextColor3 = Color3.fromRGB(80,220,80)
-                                end
-                            end
-                        end)
-                        if boosterLabels[bName] then
-                            boosterLabels[bName].Text      = "  "..bName..":  ⏳ "..fmtTime(bTime)
-                            boosterLabels[bName].TextColor3 = Color3.fromRGB(200,180,60)
-                        end
-                    end
-                    activeMM = nil; CurrentWinnings={}
-                    task.wait(3)
-                end
-            end
-            continue
-        end
-
-        mmBoardGoneAt = 0
-
-        if board ~= CurrentBoard then
-            CurrentBoard=board; KnownCards={}; SolvedSlots={}; OrderCounter=0; CurrentWinnings={}
-            task.wait(1)
-        end
-
-        local grid = board:FindFirstChild("GuiGrid") and board.GuiGrid:FindFirstChild("GuiGrid")
-        if not grid then task.wait(1) continue end
-
-        local slots={}
-        for _,c in pairs(grid:GetChildren()) do
-            if c:IsA("Frame") and not SolvedSlots[c] then table.insert(slots,c) end
-        end
-        if #slots==0 then task.wait(2) continue end
-
-        local mtype = activeMM or "Memory Match"
-        doTurn(mtype, nextAction(mtype,slots))
-    end
-end)
-
--- ============================================================
--- 8. WARNING DISK ENGINE
--- ============================================================
-local function refreshDisks()
-    local p = workspace:FindFirstChild("Particles"); if not p then return end
-    local n={}
-    for _,d in ipairs(p:GetChildren()) do
-        if d.Name=="WarningDisk" and d.Size.X<=8 then
-            if not d:GetAttribute("SpawnTime") then d:SetAttribute("SpawnTime",tick()) end
-            table.insert(n,d)
-        end
-    end
-    table.sort(n,function(a,b) return (1-a.Transparency)>(1-b.Transparency) end)
-    warnDisks.queue = n
-end
-
-local function runDisks()
-    if warnDisks.processing or #warnDisks.queue==0 then return end
-    warnDisks.processing = true
-    task.spawn(function()
-        while #warnDisks.queue>0 do
-            local d = warnDisks.queue[1]
-            if d and d.Parent then
-                local sp = d:GetAttribute("SpawnTime") or tick()
-                if d.Transparency>0.05 then
-                    local w=1.6-(tick()-sp); if w>0 then task.wait(w) end
-                end
-                if d and d.Parent then
-                    local lootStart,timeout=nil,tick()
-                    while d and d.Parent and tick()-timeout<3 do
-                        tpTo(d.Position+Vector3.new(0,1,0))
-                        RepStorage.Events.ToolCollect:FireServer()
-                        if d.Transparency<=0.05 and not lootStart then lootStart=tick() end
-                        if lootStart and tick()-lootStart>0.14 then break end
-                        RunService.Heartbeat:Wait()
-                    end
-                end
-            end
-            table.remove(warnDisks.queue,1); refreshDisks()
-        end
-        warnDisks.processing = false
-    end)
-end
-
--- ============================================================
--- 9. BOOSTER DISPATCH
--- ============================================================
-task.spawn(function()
-    while _G.Running do
-        task.wait(1)
-        if not isFarming then continue end
-        if #boosterQueue == 0 then continue end
-        if isConverting or activeBooster or warnDisks.processing or isSolvingMM or isCheckingBoosters then continue end
-
-        activeBooster = true
-        local b = table.remove(boosterQueue, 1)
-        if not b or not Boosters[b] then activeBooster = false; continue end
-
-        -- Teleport to booster and wait for proximity
-        tpTo(Boosters[b].pos)
-        anchor()
-        task.wait(1.8)
-
-        -- Read the ActivateButton
-        local abtn    = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui")
-                    and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
-        local btnText = abtn and abtn:FindFirstChild("TextBox") and abtn.TextBox.Text or ""
-        local btnBG   = abtn and abtn.BackgroundColor3 or Color3.fromRGB(0,0,0)
-        local r  = math.round(btnBG.R * 255)
-        local g  = math.round(btnBG.G * 255)
-        local bv = math.round(btnBG.B * 255)
-        local cd = parseCooldown(btnText)
-
-        if cd and cd > 0 then
-            -- Cooldown active → log and schedule retry
-            unanchor()
-            activeBooster = false
-            task.delay(cd, function()
-                if not boosterPermaIgnore[b] then
-                    table.insert(boosterQueue, b)
-                    if boosterLabels[b] then
-                        boosterLabels[b].Text      = "  "..b..":  ✅ READY"
-                        boosterLabels[b].TextColor3 = Color3.fromRGB(80,220,80)
-                    end
-                end
-            end)
-            if boosterLabels[b] then
-                boosterLabels[b].Text      = "  "..b..":  ⏳ "..fmtTime(cd)
-                boosterLabels[b].TextColor3 = Color3.fromRGB(200,180,60)
-            end
-            tpTo(fieldCenter())
-            continue
-
-        elseif r >= 180 and g <= 60 and bv <= 60 then
-            -- Red button → permanently unavailable
-            boosterPermaIgnore[b] = true
-            unanchor()
-            activeBooster = false
-            if boosterLabels[b] then
-                boosterLabels[b].Text      = "  "..b..":  [Unavailable]"
-                boosterLabels[b].TextColor3 = Color3.fromRGB(120,60,60)
-            end
-            tpTo(fieldCenter())
-            continue
-
-        else
-            -- Ready (includes spend-honey prompts — just claim it)
-            if boosterLabels[b] then
-                boosterLabels[b].Text      = "  "..b..":  🔄 Claiming"
-                boosterLabels[b].TextColor3 = Color3.fromRGB(80,180,255)
-            end
-
-            pressE()
-            task.wait(0.6)
-
-            if Boosters[b].isMM then
-                -- Memory Match path: wait for the board to appear
-                local found = false
-                local t0    = tick()
-                while tick() - t0 < 6 do
-                    task.wait(0.2)
-                    local sg2 = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui")
-                    local ml  = sg2 and sg2:FindFirstChild("MinigameLayer")
-                    if ml then
-                        for _, child in pairs(ml:GetChildren()) do
-                            if child.Name == "MemoryMatchFrame" then
-                                local cl = child:FindFirstChild("ChancesFrame")
-                                       and child.ChancesFrame:FindFirstChild("CountLabel")
-                                if cl then
-                                    local n = tonumber(cl.Text:match("%d+"))
-                                           or tonumber(cl.ContentText and cl.ContentText:match("%d+"))
-                                           or 0
-                                    if n >= 1 then found = true; break end
-                                end
-                            end
-                        end
-                    end
-                    if found then break end
-                end
-
-                unanchor()
-
-                if found then
-                    activeMM      = b
-                    isSolvingMM   = true
-                    mmBoardGoneAt = 0
-                    activeBooster = false
-                    if boosterLabels[b] then
-                        boosterLabels[b].Text      = "  "..b..":  🧠 Solving"
-                        boosterLabels[b].TextColor3 = Color3.fromRGB(180,120,255)
-                    end
-                else
-                    -- Board never appeared; re-read cooldown or fall back to default
-                    local retryCD = Boosters[b].time
-                    local abtn2   = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui")
-                                and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
-                    if abtn2 and abtn2:FindFirstChild("TextBox") then
-                        local rc = parseCooldown(abtn2.TextBox.Text)
-                        if rc and rc > 0 then retryCD = rc end
-                    end
-                    task.delay(retryCD, function()
-                        if not boosterPermaIgnore[b] then
-                            table.insert(boosterQueue, b)
-                            if boosterLabels[b] then
-                                boosterLabels[b].Text      = "  "..b..":  ✅ READY"
-                                boosterLabels[b].TextColor3 = Color3.fromRGB(80,220,80)
-                            end
-                        end
-                    end)
-                    if boosterLabels[b] then
-                        boosterLabels[b].Text      = "  "..b..":  ⏳ "..fmtTime(retryCD).." (board missed)"
-                        boosterLabels[b].TextColor3 = Color3.fromRGB(200,120,60)
-                    end
-                    activeBooster = false
-                    tpTo(fieldCenter())
-                end
-
-            else
-                -- Non-MM booster path
-                unanchor()
-
-                if Boosters[b].collectibles then
-                    local function nearby()
-                        local c = {}
-                        for _, t in ipairs(workspace.Collectibles:GetChildren()) do
-                            if t:IsA("Part") and (t.Position - Boosters[b].pos).Magnitude < 30 then
-                                table.insert(c, t)
-                            end
-                        end
-                        return c
-                    end
-                    local t0 = tick()
-                    repeat task.wait(0.1) until #nearby() > 0 or tick() - t0 > 6
-                    local vt = tick()
-                    while tick() - vt < 12 do
-                        local n2 = nearby(); if #n2 == 0 then break end
-                        for _, t in ipairs(n2) do tpTo(t.Position); task.wait(0.05) end
-                    end
-                end
-
-                task.delay(Boosters[b].time, function()
-                    if not boosterPermaIgnore[b] then
-                        table.insert(boosterQueue, b)
-                        if boosterLabels[b] then
-                            boosterLabels[b].Text      = "  "..b..":  ✅ READY"
-                            boosterLabels[b].TextColor3 = Color3.fromRGB(80,220,80)
-                        end
-                    end
-                end)
-                if boosterLabels[b] then
-                    boosterLabels[b].Text      = "  "..b..":  ⏳ "..fmtTime(Boosters[b].time)
-                    boosterLabels[b].TextColor3 = Color3.fromRGB(200,180,60)
-                end
-                task.wait(1.5)
-                activeBooster = false
-                tpTo(fieldCenter())
-            end
-        end
-    end
-end)
-
--- ============================================================
--- 10. STATS UPDATE (1s tick)
--- ============================================================
-task.spawn(function()
-    while _G.Running do
-        task.wait(1)
-        local now     = tick()
-        local elapsed = math.max(1, now - sessionStart)
-        local honey   = LocalPlayer.CoreStats.Honey.Value - sessionHoney
-        local hps     = honey / elapsed
-        local pps     = totalPollen / elapsed
-
-        local dHPS = hps
-        if showInterval then
-            local ie = math.max(1, now - intervalStart)
-            dHPS = (LocalPlayer.CoreStats.Honey.Value - intervalHoney) / ie
-        end
-
-        if UI.hS then
-            UI.hS.Text    = "  H/s:  "..fmt(dHPS)
-            UI.hM.Text    = "  H/m:  "..fmt(dHPS*60)
-            UI.hH.Text    = "  H/h:  "..fmt(dHPS*3600)
-            UI.pS.Text    = "  P/s:  "..fmt(pps)
-            UI.pM.Text    = "  P/m:  "..fmt(pps*60)
-            UI.pH.Text    = "  P/h:  "..fmt(pps*3600)
-            UI.total.Text = "  Total Honey:  "..fmt(honey)
-            UI.time.Text  = "  Runtime:  "..os.date("!%X", elapsed)
-            if UI.fieldLbl then UI.fieldLbl.Text = "  Field: "..currentField end
-
-            local lines = {}
-            for id,cnt in pairs(totalMMRewards) do
-                table.insert(lines, "  "..getAssetName(id)..": x"..cnt)
-            end
-            UI.mm.Text = #lines > 0 and table.concat(lines, "\n") or "  No rewards yet."
-        end
-
-        -- ── Capacity filter ──────────────────────────────────────────
-        local rawCap = LocalPlayer.CoreStats.Capacity.Value or 0
-        -- Guard: if lastValidCapacity somehow became nil, reset it now
-        if not lastValidCapacity or lastValidCapacity == 0 then
-            lastValidCapacity = rawCap
-        end
-        local logCap
-        if isConverting then
-            logCap = rawCap
-            lastValidCapacity = rawCap
-        elseif activeBooster or isCheckingBoosters then
-            logCap = lastValidCapacity
-        else
-            if rawCap >= lastValidCapacity * 0.80 then
-                lastValidCapacity = rawCap
-                logCap = rawCap
-            else
-                logCap = lastValidCapacity
-            end
-        end
-
-        -- ── Rolling current rates (10s window) ──────────────────────
-        local nowHoney  = LocalPlayer.CoreStats.Honey.Value
-        local nowPollen = LocalPlayer.CoreStats.Pollen.Value + totalPollen  -- total pollen seen
-        table.insert(rateHoneyHistory,  {t=now, v=nowHoney})
-        table.insert(ratePollenHistory, {t=now, v=nowPollen})
-        -- Trim entries older than RATE_WINDOW
-        while #rateHoneyHistory  > 1 and now - rateHoneyHistory[1].t  > RATE_WINDOW do table.remove(rateHoneyHistory,  1) end
-        while #ratePollenHistory > 1 and now - ratePollenHistory[1].t > RATE_WINDOW do table.remove(ratePollenHistory, 1) end
-        -- Compute current rate from oldest entry in window
-        local currentHPS, currentPPS = hps, pps  -- fallback to session avg
-        if #rateHoneyHistory >= 2 then
-            local dt = rateHoneyHistory[#rateHoneyHistory].t - rateHoneyHistory[1].t
-            if dt > 0 then currentHPS = (rateHoneyHistory[#rateHoneyHistory].v - rateHoneyHistory[1].v) / dt end
-        end
-        if #ratePollenHistory >= 2 then
-            local dt = ratePollenHistory[#ratePollenHistory].t - ratePollenHistory[1].t
-            if dt > 0 then currentPPS = (ratePollenHistory[#ratePollenHistory].v - ratePollenHistory[1].v) / dt end
-        end
-
-        -- ── Only write to CSV while actively farming ────────────────
-        if isFarming then
-            -- ── Hourly file rotation ──────────────────────────────────
-            if now - hourRotateTime >= 3600 then
-                flushCSV()
-                openNewFiles()
-                tileStates    = {}   -- clear so all tiles re-log in the new file
-                hourRotateTime = now
-            end
-
-            -- ── Write stats row ───────────────────────────────────────
-            -- Columns: Timestamp, TotalHoney, HPS, CurrentHPS, Pollen, PPS, CurrentPPS,
-            --          Capacity, Field, Converting, BalloonPollen
-            local cP    = LocalPlayer.CoreStats.Pollen.Value
-            local bpStr = balloonPollenNow >= 0 and tostring(balloonPollenNow) or ""
-            table.insert(statsBuffer, string.format(
-                "%s,%d,%d,%d,%d,%d,%d,%d,\"%s\",%s,%s",
-                os.date("%Y-%m-%d %H:%M:%S"),
-                LocalPlayer.CoreStats.Honey.Value,
-                math.floor(hps),
-                math.floor(math.max(0, currentHPS)),
-                cP,
-                math.floor(pps),
-                math.floor(math.max(0, currentPPS)),
-                logCap,
-                currentField,
-                tostring(isConverting),
-                bpStr
-            ))
-
-            if now - lastSaveTime >= SAVE_INTERVAL then
-                flushCSV()
-                lastSaveTime = now
-            end
-        end
-
-        if ignoreBalloonUntil > 0 and now > ignoreBalloonUntil then
-            ignoreBalloonUntil = 0
-        end
-    end
-end)
-
--- ============================================================
--- 11. HONEY CONVERSION TASK
--- ============================================================
-task.spawn(function()
-    local didInitialSetup = false
-
-    while _G.Running do
-        task.wait(0.1)
-        if not isFarming or not isConverting then
-            didInitialSetup = false
-            continue
-        end
-
-        local _,hrp = getChar()
-        if not hrp then continue end
-
-        if not didInitialSetup then
-            didInitialSetup = true
-            local hP = getHivePos()
-            if hP then
-                tpTo(hP)
-                RepStorage.Events.ItemPackageEvent:InvokeServer("Equip",{["Category"]="Accessory",["Type"]="Honey Mask"})
-                task.wait(1)
-                RepStorage.Events.PlayerHiveCommand:FireServer("ToggleHoneyMaking")
-            end
-            continue
-        end
-
-        local hPos = getHivePos()
-        if hPos then
-            local xzd = Vector2.new(hrp.Position.X-hPos.X, hrp.Position.Z-hPos.Z).Magnitude
-            if xzd>5 or math.abs(hrp.Position.Y-hPos.Y)>30 then tpTo(hPos) end
-        end
-
-        local abtn = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui") and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("ActivateButton")
-        if abtn and abtn:FindFirstChild("TextBox") then
-            local txt = abtn.TextBox.Text
-
-            if txt:find("Pollen From Flower Fields") then
-                RepStorage.Events.ItemPackageEvent:InvokeServer("Equip",{["Category"]="Accessory",["Type"]="Diamond Mask"})
-                isConverting    = false
-                didInitialSetup = false
-                lastEmptied     = tick()
-                tpTo(fieldCenter())
-                continue
-            end
-
-            if txt:lower():find("make honey") and tick()-lastHoneyEPress>5 then
-                lastHoneyEPress=tick(); pressE()
-            end
-
-            local shouldIgnore = ignoreBalloonever or (tick()<ignoreBalloonUntil)
-            if shouldIgnore and not balloonBailPending then
-                local pol = LocalPlayer.CoreStats.Pollen.Value
-                if pol == 0 then
-                    balloonBailPending = true
-                    task.spawn(function()
-                        task.wait(5)
-                        if isConverting and LocalPlayer.CoreStats.Pollen.Value == 0 then
-                            isConverting    = false
-                            didInitialSetup = false
-                            tpTo(fieldCenter())
-                        end
-                        balloonBailPending = false
-                    end)
-                end
-            end
-        end
-    end
-end)
-
--- ============================================================
--- 12. SPRINKLER TASK
--- ============================================================
-task.spawn(function()
-    while _G.Running do
-        task.wait(0.5)
-        if not isFarming or isConverting or activeBooster or isCheckingBoosters or isSolvingMM then continue end
-        if sprinklerField == currentField then continue end
-        tpTo(fieldCenter())
-        task.wait(0.6)
-        RepStorage.Events.PlayerActivesCommand:FireServer({Name="Sprinkler Builder"})
-        sprinklerField = currentField
-        task.wait(0.4)
-    end
-end)
-
--- ============================================================
--- 13. HEARTBEAT — failsafes only
--- ============================================================
-table.insert(connections, RunService.Heartbeat:Connect(function()
-    if not _G.Running then return end
-    refreshDisks()
-
-    if not isFarming then return end
-    local _,hrp = getChar()
-    if not hrp then return end
-
-    if activeBooster or isCheckingBoosters then
-        hrp.Velocity = Vector3.new(0, hrp.Velocity.Y, 0)
-    end
-
-    if not isConverting and not isCheckingBoosters and not activeBooster and not isSolvingMM then
-        if not inField(hrp.Position) then
-            if tick()-lastInField > 10 then tpTo(fieldCenter()); lastInField=tick() end
-        else
-            lastInField = tick()
-        end
-    end
-end))
-
--- ============================================================
--- 14. MAIN FARMING LOOP — RenderStepped
--- ============================================================
-table.insert(connections, RunService.RenderStepped:Connect(function(dt)
-    if not _G.Running or not isFarming then return end
-    if isConverting or isCheckingBoosters or activeBooster or isSolvingMM then return end
-
-    local _,hrp,hum = getChar()
-    if not hrp or not hum then return end
-
-    -- Trigger conversion when full
-    local pol = LocalPlayer.CoreStats.Pollen.Value
-    local cap = LocalPlayer.CoreStats.Capacity.Value
-    if pol >= cap then
-        if not waitingForBees then
-            waitingForBees=true; fullBagTime=tick()
-            if tick()-lastEmptied<5 then quickRefill+=1 else quickRefill=0 end
-        end
-        if quickRefill>=5 or tick()-fullBagTime>=5 then
-            isConverting   = true
-            waitingForBees = false
-            quickRefill    = 0
-        end
-        return
-    else
-        if waitingForBees then waitingForBees=false; lastEmptied=tick() end
-    end
-
-    -- Warning disks take absolute priority
-    if #warnDisks.queue>0 or warnDisks.processing then runDisks(); return end
-
-    -- Collect remote call every frame
-    RepStorage.Events.ToolCollect:FireServer()
-
-    local b = fieldBounds()
-
-    -- Expire dismissed tokens (10s) and permaIgnore cleanup
-    local now = tick()
-    for p,t in pairs(dismissedTokens) do
-        if now - t >= 10 then dismissedTokens[p] = nil end
-    end
-
-    -- ──────────────────────────────────────────────────────────
-    -- Build candidate list
-    -- Priority tier: 0=Important token, 1=Crosshair, 2=Petal,
-    --                3=Bloom, 4=Normal token
-    -- Within the same tier, oldest first (by firstAttemptTimes).
-    -- Tokens in dismissedTokens or permaIgnore are skipped.
-    -- ──────────────────────────────────────────────────────────
-    local res = {}
-
-    -- Tokens
-    for _,p in ipairs(workspace.Collectibles:GetChildren()) do
-        if p:IsA("Part") and not permaIgnore[p] and not dismissedTokens[p] then
-            if math.abs(p.Position.Y - hrp.Position.Y) > 5 then permaIgnore[p]=true; continue end
-            if inField(p.Position) then
-                -- Register spawn time on first sight
-                if not firstAttemptTimes[p] then firstAttemptTimes[p] = now end
-                -- Perma-ignore truly stuck tokens (10s hard cap)
-                if now - firstAttemptTimes[p] > 10 then permaIgnore[p]=true; continue end
-                local partID = p.Name
-                local img = p:FindFirstChildWhichIsA("Decal") or p:FindFirstChildWhichIsA("SpecialMesh")
-                if img then
-                    local tex = tostring(img.Texture or img.MeshId or "")
-                    local extracted = tex:match("%d+")
-                    if extracted then partID = extracted end
-                end
-                local isImportant = ImportantIDs[partID] or ImportantIDs[p.Name]
-                table.insert(res, {
-                    part    = p,
-                    pri     = isImportant and 0 or 4,
-                    typ     = "Token",
-                    spawnAt = firstAttemptTimes[p],
-                })
-            end
-        end
-    end
-
-    -- Crosshairs (pri 1)
-    for _,p in ipairs(workspace.Particles:GetChildren()) do
-        if p.Name=="Crosshair" and not crosshairBlacklist[p] and inField(p.Position) then
-            crosshairSeen[p] = (crosshairSeen[p] or 0) + 1
-            if crosshairSeen[p] >= 3 then
-                crosshairBlacklist[p] = true
-            else
-                if not firstAttemptTimes[p] then firstAttemptTimes[p] = now end
-                table.insert(res, {part=p, pri=1, typ="Crosshair", spawnAt=firstAttemptTimes[p]})
-            end
-        end
-    end
-
-    if collectBlooms then
-        -- Petals (pri 2)
-        for _,p in ipairs(workspace.Particles:GetChildren()) do
-            if p.Name=="PetalPart" and not collectedPetals[p] then
-                local xzOk = p.Position.X>=b.x1 and p.Position.X<=b.x2
-                          and p.Position.Z>=b.z1 and p.Position.Z<=b.z2
-                if xzOk then
-                    if not firstAttemptTimes[p] then firstAttemptTimes[p] = now end
-                    table.insert(res, {part=p, pri=2, typ="Petal", spawnAt=firstAttemptTimes[p]})
-                end
-            end
-        end
-
-        -- Blooms (pri 3)
-        local happenings = workspace:FindFirstChild("Happenings")
-        local poppable   = happenings and happenings:FindFirstChild("PoppablePlants")
-        if poppable then
-            for _,bloom in ipairs(poppable:GetChildren()) do
-                if bloom.Name == "Bloom" then
-                    local bPart = bloom:FindFirstChildWhichIsA("BasePart") or (bloom:IsA("BasePart") and bloom)
-                    local bPos  = bPart and bPart.Position
-                    if bPos and inField(bPos) then
-                        knownBloomPos[bloom] = Vector3.new(bPos.X, bPos.Y, bPos.Z)
-                        if not firstAttemptTimes[bloom] then firstAttemptTimes[bloom] = now end
-                        table.insert(res, {part=bloom, pri=3, typ="Bloom", spawnAt=firstAttemptTimes[bloom]})
-                    end
-                end
-            end
-        end
-
-        for bloom in pairs(knownBloomPos) do
-            if not bloom.Parent then knownBloomPos[bloom] = nil end
-        end
-    end
-
-    -- Cleanup collectedPetals
-    for p,tTime in pairs(collectedPetals) do
-        if now - tTime > 15 then collectedPetals[p] = nil end
-    end
-
-    -- Sort: primary = priority tier (lower = better), secondary = oldest first
-    table.sort(res, function(a, bx)
-        if a.pri ~= bx.pri then return a.pri < bx.pri end
-        return (a.spawnAt or 0) < (bx.spawnAt or 0)
-    end)
-
-    -- Best candidate (nil if list is empty)
-    local best = res[1]
-
-    -- ──────────────────────────────────────────────────────────
-    -- Target assignment
-    -- Only assign a new target (and bake its overshoot) when:
-    --   • we have no current target, OR
-    --   • a higher-priority candidate exists
-    -- Never update currentOvershootPos for the same target.
-    -- ──────────────────────────────────────────────────────────
-    local function assignTarget(entry)
-        currentTarget     = entry.part
-        currentTargetType = entry.typ
-        -- Bake overshoot once. For tokens: 5 studs past the token along
-        -- the approach vector at assignment time.
-        if entry.typ == "Token" then
-            local tPos = entry.part.Position
-            local dir  = Vector3.new(tPos.X - hrp.Position.X, 0, tPos.Z - hrp.Position.Z)
-            if dir.Magnitude > 0 then
-                currentOvershootPos = tPos + dir.Unit * 5
-            else
-                currentOvershootPos = tPos
-            end
-        else
-            currentOvershootPos = nil
-        end
-    end
-
-    if not currentTarget then
-        if best then assignTarget(best) end
-    else
-        -- Check if current target is still a valid candidate
-        local currentStillValid = false
-        local currentPri = 99
-        for _,entry in ipairs(res) do
-            if entry.part == currentTarget then
-                currentStillValid = true
-                currentPri = entry.pri
-                break
-            end
-        end
-        -- Switch only if something strictly higher-priority appeared
-        if not currentStillValid then
-            -- Current target was dismissed/permaIgnored externally; pick best
-            currentTarget = nil; currentOvershootPos = nil
-            if best then assignTarget(best) end
-        elseif best and best.pri < currentPri then
-            assignTarget(best)
-        end
-    end
-
-    -- ──────────────────────────────────────────────────────────
-    -- Movement
-    -- ──────────────────────────────────────────────────────────
-    if currentTarget then
-
-        if currentTargetType == "Crosshair" then
-            local tPos   = currentTarget.Position
-            local reached = stepToward(hrp, hum, tPos, 3)
-            if reached then
-                local t0 = tick()
-                task.spawn(function()
-                    while currentTarget and currentTarget.Parent and tick()-t0 < 4 do
-                        RepStorage.Events.ToolCollect:FireServer()
-                        task.wait(0.05)
-                    end
-                end)
-                crosshairBlacklist[currentTarget] = true
-                currentTarget     = nil
-                currentOvershootPos = nil
-            end
-
-        elseif currentTargetType == "Petal" then
-            local tPos   = currentTarget.Position
-            local xzDist = Vector2.new(hrp.Position.X-tPos.X, hrp.Position.Z-tPos.Z).Magnitude
-            local dir    = Vector3.new(tPos.X - hrp.Position.X, 0, tPos.Z - hrp.Position.Z)
-            if dir.Magnitude > 0 then
-                hum.WalkToPoint = Vector3.new(tPos.X, hrp.Position.Y, tPos.Z) + dir.Unit * 5
-            end
-            local timeOn = now - (firstAttemptTimes[currentTarget] or now)
-            if xzDist < 6 or timeOn > 3 then
-                collectedPetals[currentTarget] = now
-                currentTarget     = nil
-                currentOvershootPos = nil
-            end
-
-        elseif currentTargetType == "Bloom" then
-            if not currentTarget.Parent then
-                currentTarget     = nil
-                currentOvershootPos = nil
-            else
-                local bCenter = knownBloomPos[currentTarget]
-                if not bCenter then currentTarget = nil; currentOvershootPos = nil; return end
-                local needNewWander = not wanderPos
-                    or (hrp.Position - wanderPos).Magnitude < 5
-                    or now - wanderTime > 6
-                    or Vector2.new(wanderPos.X - bCenter.X, wanderPos.Z - bCenter.Z).Magnitude > 30
-                if needNewWander then
-                    local angle  = math.random() * math.pi * 2
-                    local radius = math.random(5, 25)
-                    local wx = math.clamp(bCenter.X + math.cos(angle)*radius, b.x1, b.x2)
-                    local wz = math.clamp(bCenter.Z + math.sin(angle)*radius, b.z1, b.z2)
-                    wanderPos  = Vector3.new(wx, hrp.Position.Y, wz)
-                    wanderTime = now
-                end
-                stepToward(hrp, hum, wanderPos, 5)
-            end
-
-        else
-            -- ── Token: walk to the BAKED overshoot, dismiss on arrival ──
-            if not currentOvershootPos then
-                -- Fallback: should never happen, but just dismiss
-                dismissedTokens[currentTarget] = now
-                currentTarget     = nil
-                currentOvershootPos = nil
-            else
-                hum.WalkToPoint = currentOvershootPos
-
-                local dist = Vector3.new(
-                    hrp.Position.X - currentOvershootPos.X,
-                    0,
-                    hrp.Position.Z - currentOvershootPos.Z
-                ).Magnitude
-
-                if dist <= 4 then
-                    -- Reached overshoot — assume collected, dismiss and move on
-                    dismissedTokens[currentTarget] = now
-                    currentTarget     = nil
-                    currentOvershootPos = nil
-                    -- wander/next-target logic runs next frame automatically
-                end
-            end
-        end
-
-    else
-        -- No target — wander the field
-        local ix1,ix2 = math.floor(b.x1), math.ceil(b.x2)
-        local iz1,iz2 = math.floor(b.z1), math.ceil(b.z2)
-        if not wanderPos or (hrp.Position-wanderPos).Magnitude < 5 or now-wanderTime > 8 then
-            wanderPos  = Vector3.new(math.random(ix1,ix2), hrp.Position.Y, math.random(iz1,iz2))
-            wanderTime = now
-        end
-        stepToward(hrp, hum, wanderPos, 5)
-    end
-
-    lastHRPPos = hrp.Position
-end))
-
--- ============================================================
--- 15. WEBHOOK (5 min)
--- ============================================================
-task.spawn(function()
-    while _G.Running do
-        task.wait(300)
-        local e = math.max(1,tick()-sessionStart)
-        local h = LocalPlayer.CoreStats.Honey.Value - sessionHoney
-        local hps,pps = h/e, totalPollen/e
-        sendWebhook({embeds={{
-            title="BSS V23 UPDATE", color=0x00A2FF,
-            fields={
-                {name="Honey S/M/H",  value=fmt(hps).."|"..fmt(hps*60).."|"..fmt(hps*3600)},
-                {name="Pollen S/M/H", value=fmt(pps).."|"..fmt(pps*60).."|"..fmt(pps*3600)},
-                {name="Total",        value=fmt(h),              inline=true},
-                {name="Runtime",      value=os.date("!%X",e),    inline=true},
-                {name="Field",        value=currentField,         inline=true},
-            },
-            timestamp=os.date("!%Y-%m-%dT%H:%M:%SZ")
-        }}})
-    end
-end)
-
--- ============================================================
--- 16. TILE MONITOR (full overhaul)
--- Scans ALL tiles every 0.25s — no whitelist needed.
--- Logs every tile that appears or changes multiplier.
--- Downloads the asset thumbnail image on first sight.
--- CSV columns: Timestamp, AssetID, AssetName, Multiplier, State
--- Multiplier is stored as plain integer (e.g. 3 not x3) for easy
--- graphing — State is "Active" or "Removed".
--- ============================================================
-task.spawn(function()
-    while _G.Running do
-        task.wait(0.25)
-        local sg2  = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui")
-        local grid = sg2 and sg2:FindFirstChild("TileGrid")
-        if not grid then continue end
-        if not isFarming then continue end   -- don't log tiles while idle
-
-        local nowStr = os.date("%Y-%m-%d %H:%M:%S")
-        local seen   = {}   -- assetId -> true this tick
-
-        for _,tile in ipairs(grid:GetChildren()) do
-            if tile.Name ~= "IconTile" then continue end
-            local bg = tile:FindFirstChild("BG")
-            if not bg then continue end
-            local iconLbl = bg:FindFirstChild("Icon")
-            if not iconLbl then continue end
-
-            local rawImg = iconLbl.Image or ""
-            local assetId = rawImg:match("%d+")
-            if not assetId then continue end
-
-            -- Parse multiplier — strip the 'x', default 1
-            local multRaw = (bg:FindFirstChild("Text") and bg.Text.ContentText ~= ""
-                            and bg.Text.ContentText) or "x1"
-            local multNum = tonumber(multRaw:match("%d+")) or 1
-
-            seen[assetId] = true
-
-            local prev = tileStates[assetId]
-            if not prev or prev ~= multNum then
-                -- New tile or multiplier changed
-                tileStates[assetId] = multNum
-
-                -- Resolve asset name (cached)
-                local name = getAssetName(assetId)
-
-                -- Download thumbnail once
-                ensureAssetImage(assetId, name)
-
-                -- Escape name for CSV (wrap in quotes, escape internal quotes)
-                local safeName = '"'..name:gsub('"', '""')..'"'
-
-                table.insert(tilesBuffer, string.format(
-                    "%s,%s,%s,%d,Active",
-                    nowStr, assetId, safeName, multNum
-                ))
-            end
-        end
-
-        -- Log removals for tiles that disappeared this tick
-        for assetId in pairs(tileStates) do
-            if not seen[assetId] then
-                local name     = getAssetName(assetId)
-                local safeName = '"'..name:gsub('"', '""')..'"'
-                table.insert(tilesBuffer, string.format(
-                    "%s,%s,%s,0,Removed",
-                    nowStr, assetId, safeName
-                ))
-                tileStates[assetId] = nil
-            end
-        end
-    end
-end)
-
--- ============================================================
--- 17. ANTI-IDLE
--- ============================================================
-table.insert(connections, LocalPlayer.Idled:Connect(function()
-    VUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
-    task.wait(1)
-    VUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
-end))
-
-print("✅ BSS V23 loaded. Press START FARMING to begin.")
+
+
+def build_html(sessions_data: list, session_labels: list) -> str:
+    """
+    sessions_data: list of { label, stats_df, tiles_df, summary, tile_summaries }
+    """
+    payload = []
+    for sd in sessions_data:
+        payload.append({
+            "label":    sd["label"],
+            "combined": serialize_log(sd["combined"]),
+            "hours":    [serialize_log(h) for h in sd["hours"]],
+        })
+
+    data_json   = json.dumps(payload, default=str)
+    colors_json = json.dumps(DEFAULT_COLORS)
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BSS Analytics Dashboard</title>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+:root {{
+  --bg:        #0a0a0f;
+  --surface:   #111118;
+  --surface2:  #18181f;
+  --border:    #2a2a38;
+  --accent:    #f5c542;
+  --accent2:   #4fc3f7;
+  --text:      #e8e8f0;
+  --muted:     #6b6b80;
+  --danger:    #f06292;
+  --green:     #81c784;
+  --radius:    10px;
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-ui:   'Syne', sans-serif;
+}}
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  min-height: 100vh;
+  overflow-x: hidden;
+}}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar {{ width: 6px; height: 6px; }}
+::-webkit-scrollbar-track {{ background: var(--bg); }}
+::-webkit-scrollbar-thumb {{ background: var(--border); border-radius: 3px; }}
+
+/* ── Layout ── */
+.shell {{
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  min-height: 100vh;
+}}
+.sidebar {{
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: 24px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}}
+.main {{
+  padding: 32px;
+  overflow-x: hidden;
+}}
+
+/* ── Brand ── */
+.brand {{
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+}}
+.brand span {{ color: var(--muted); font-weight: 400; }}
+
+/* ── Sidebar nav ── */
+.nav-section {{
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 12px 0 4px;
+  padding-left: 4px;
+}}
+.nav-btn {{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: var(--font-ui);
+  color: var(--muted);
+  background: none;
+  border: none;
+  width: 100%;
+  text-align: left;
+  transition: background 0.15s, color 0.15s;
+}}
+.nav-btn:hover {{ background: var(--surface2); color: var(--text); }}
+.nav-btn.active {{ background: var(--surface2); color: var(--accent); font-weight: 600; }}
+.nav-dot {{
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--border);
+  flex-shrink: 0;
+}}
+.nav-btn.active .nav-dot {{ background: var(--accent); }}
+
+/* ── Page sections ── */
+.page {{ display: none; }}
+.page.active {{ display: block; }}
+
+/* ── Page header ── */
+.page-header {{
+  margin-bottom: 28px;
+}}
+.page-header h1 {{
+  font-size: 28px;
+  font-weight: 800;
+  color: var(--text);
+  line-height: 1;
+}}
+.page-header p {{
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-family: var(--font-mono);
+}}
+
+/* ── Session selector ── */
+.session-tabs {{
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 28px;
+}}
+.sess-tab {{
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: all 0.15s;
+}}
+.sess-tab:hover {{ border-color: var(--accent); color: var(--text); }}
+.sess-tab.active {{ border-color: var(--accent); background: rgba(245,197,66,0.08); color: var(--accent); font-weight: 600; }}
+
+/* ── Stat cards ── */
+.stat-grid {{
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 28px;
+}}
+.stat-card {{
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  position: relative;
+  overflow: hidden;
+}}
+.stat-card::before {{
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: var(--card-accent, var(--accent));
+}}
+.stat-label {{
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 8px;
+  font-family: var(--font-mono);
+}}
+.stat-value {{
+  font-size: 26px;
+  font-weight: 800;
+  color: var(--text);
+  font-family: var(--font-mono);
+  line-height: 1;
+}}
+.stat-sub {{
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+  font-family: var(--font-mono);
+}}
+
+/* ── Chart card ── */
+.chart-card {{
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 20px;
+}}
+.chart-header {{
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 10px;
+}}
+.chart-title {{
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  font-family: var(--font-mono);
+  letter-spacing: 0.04em;
+}}
+.chart-controls {{
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}}
+.color-pick {{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+}}
+.color-pick input[type=color] {{
+  width: 28px; height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+  padding: 2px;
+}}
+.chart-div {{ width: 100%; }}
+
+/* ── Tile section ── */
+.tile-controls {{
+  display: flex;
+  gap: 10px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+  align-items: center;
+}}
+.search-box {{
+  flex: 1;
+  min-width: 200px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s;
+}}
+.search-box:focus {{ border-color: var(--accent); }}
+.search-box::placeholder {{ color: var(--muted); }}
+.btn {{
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}}
+.btn:hover {{ border-color: var(--accent); color: var(--accent); }}
+.btn.primary {{ background: var(--accent); color: #000; border-color: var(--accent); font-weight: 700; }}
+.btn.primary:hover {{ background: #e5b530; }}
+.btn.danger {{ border-color: var(--danger); color: var(--danger); }}
+.btn.danger:hover {{ background: rgba(240,98,146,0.1); }}
+
+/* ── Tile grid ── */
+.tile-grid {{
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+  margin-bottom: 24px;
+}}
+.tile-card {{
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  position: relative;
+  user-select: none;
+}}
+.tile-card:hover {{ border-color: var(--accent2); }}
+.tile-card.selected {{ border-color: var(--accent); background: rgba(245,197,66,0.05); }}
+.tile-card.ignored {{ opacity: 0.3; border-style: dashed; }}
+.tile-top {{
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}}
+.tile-img {{
+  width: 48px; height: 48px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--surface2);
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+}}
+.tile-img-placeholder {{
+  width: 48px; height: 48px;
+  border-radius: 6px;
+  background: var(--surface2);
+  border: 1px dashed var(--border);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+}}
+.tile-info {{ flex: 1; min-width: 0; }}
+.tile-name {{
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+}}
+.tile-id {{
+  font-size: 10px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  margin-top: 2px;
+}}
+.tile-color-row {{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}}
+.tile-color-row input[type=color] {{
+  width: 24px; height: 20px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: none;
+  cursor: pointer;
+  padding: 1px;
+}}
+.tile-color-label {{
+  font-size: 10px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+}}
+.tile-stats {{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}}
+.tile-stat {{
+  background: var(--surface2);
+  border-radius: 4px;
+  padding: 5px 8px;
+}}
+.tile-stat-label {{
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  font-family: var(--font-mono);
+}}
+.tile-stat-val {{
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  font-family: var(--font-mono);
+}}
+.tile-sel-badge {{
+  position: absolute;
+  top: 8px; right: 8px;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  color: #000;
+  font-weight: 800;
+}}
+.tile-card.selected .tile-sel-badge {{ display: flex; }}
+
+/* ── Ignore list panel ── */
+.ignore-panel {{
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 20px;
+}}
+.ignore-panel h3 {{
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 10px;
+  font-family: var(--font-mono);
+}}
+.ignore-chips {{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 28px;
+}}
+.ignore-chip {{
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(240,98,146,0.12);
+  border: 1px solid rgba(240,98,146,0.3);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--danger);
+}}
+.ignore-chip button {{
+  background: none;
+  border: none;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+  opacity: 0.7;
+}}
+.ignore-chip button:hover {{ opacity: 1; }}
+.empty-ignore {{ font-size: 12px; color: var(--muted); font-family: var(--font-mono); }}
+
+/* ── Graph builder ── */
+.graph-builder {{
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 20px;
+}}
+.graph-builder h3 {{
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 14px;
+  font-family: var(--font-mono);
+}}
+.graph-mode-row {{
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}}
+.mode-btn {{
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--muted);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: all 0.15s;
+}}
+.mode-btn.active {{ border-color: var(--accent2); color: var(--accent2); background: rgba(79,195,247,0.08); }}
+
+/* ── Field breakdown ── */
+.field-list {{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}}
+.field-row {{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}}
+.field-bar-bg {{
+  flex: 1;
+  height: 6px;
+  background: var(--surface2);
+  border-radius: 3px;
+  overflow: hidden;
+}}
+.field-bar-fill {{
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.6s ease;
+}}
+.field-name {{
+  font-size: 11px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  width: 140px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+.field-pct {{
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  width: 38px;
+  text-align: right;
+}}
+
+/* ── Empty state ── */
+.empty-state {{
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}}
+.empty-state .icon {{ font-size: 40px; margin-bottom: 12px; }}
+
+/* ── Toast ── */
+#toast {{
+  position: fixed;
+  bottom: 24px; right: 24px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text);
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.2s, transform 0.2s;
+  pointer-events: none;
+  z-index: 9999;
+}}
+#toast.show {{ opacity: 1; transform: translateY(0); }}
+
+/* ── Snap / export mode ── */
+.snap .sidebar, .snap .session-tabs, .snap #logNav,
+.snap .tile-controls, .snap .graph-builder, .snap .ignore-panel,
+.snap .chart-controls, .snap #comboSeriesRow, .snap .tile-color-row,
+.snap .win-controls, .snap .win-series-row, .snap #toast {{ display: none !important; }}
+.snap .shell {{ grid-template-columns: 1fr; }}
+.snap .page {{ display: block !important; }}
+.snap .main {{ padding: 20px; }}
+.snap .win-card {{ break-inside: avoid; }}
+.snap .win-title {{ font-size: 16px; font-weight: 700; color: var(--text); margin-bottom: 12px; font-family: var(--font-mono); }}
+
+/* ── Window cards ── */
+.win-card {{
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 20px;
+}}
+.win-controls {{
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+  gap: 8px;
+  flex-wrap: wrap;
+}}
+.win-title-input {{
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 10px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  outline: none;
+  min-width: 160px;
+  transition: border-color 0.15s;
+}}
+.win-title-input:focus {{ border-color: var(--accent); }}
+.win-series-row {{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px;
+  background: var(--surface2);
+  border-radius: 6px;
+  margin-bottom: 14px;
+}}
+.series-pill {{
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.15s, color 0.15s;
+}}
+.series-pill.on {{ border-color: var(--accent); color: var(--text); background: rgba(245,197,66,0.06); }}
+.series-pill input[type=color] {{
+  width: 18px; height: 14px;
+  border: none; background: none;
+  cursor: pointer; padding: 0;
+}}
+.series-pill input[type=checkbox] {{ cursor: pointer; }}
+
+/* ── Responsive ── */
+@media (max-width: 768px) {{
+  .shell {{ grid-template-columns: 1fr; }}
+  .sidebar {{ position: static; height: auto; }}
+  .main {{ padding: 16px; }}
+}}
+</style>
+</head>
+<body>
+<div class="shell">
+
+<!-- ── SIDEBAR ─────────────────────────────────────────── -->
+<nav class="sidebar">
+  <div class="brand">BSS<span>/analyze</span></div>
+
+  <div class="nav-section">Overview</div>
+  <button class="nav-btn active" onclick="showPage('overview', this)">
+    <div class="nav-dot"></div>Dashboard
+  </button>
+
+  <div class="nav-section">Performance</div>
+  <button class="nav-btn" onclick="showPage('honey', this)">
+    <div class="nav-dot"></div>Honey & Pollen
+  </button>
+  <button class="nav-btn" onclick="showPage('capacity', this)">
+    <div class="nav-dot"></div>Capacity
+  </button>
+  <button class="nav-btn" onclick="showPage('balloon', this)">
+    <div class="nav-dot"></div>Balloon Pollen
+  </button>
+  <button class="nav-btn" onclick="showPage('combined', this)">
+    <div class="nav-dot"></div>Combined Graph
+  </button>
+  <button class="nav-btn" onclick="showPage('field', this)">
+    <div class="nav-dot"></div>Field Breakdown
+  </button>
+
+  <div class="nav-section">Tiles</div>
+  <button class="nav-btn" onclick="showPage('tiles', this)">
+    <div class="nav-dot"></div>Tile Browser
+  </button>
+  <button class="nav-btn" onclick="showPage('tilegraphs', this)">
+    <div class="nav-dot"></div>Tile Graphs
+  </button>
+
+  <div class="nav-section">Windows</div>
+  <button class="nav-btn" onclick="showPage('windows', this)">
+    <div class="nav-dot"></div>Graph Windows
+  </button>
+
+  <div style="margin-top:auto;padding-top:16px;border-top:1px solid var(--border)">
+    <button class="btn primary" style="width:100%;margin-bottom:6px" onclick="saveSnapshot()">⬇ Save as HTML</button>
+    <div style="font-size:10px;color:var(--muted);font-family:var(--font-mono);text-align:center;line-height:1.5">
+      Renders all graphs &amp; saves<br>a clean shareable file
+    </div>
+  </div>
+</nav>
+
+<!-- ── MAIN ────────────────────────────────────────────── -->
+<main class="main">
+
+<!-- SESSION TABS (shown on all pages) -->
+<div class="session-tabs" id="sessionTabs"></div>
+
+<!-- ════════════ OVERVIEW ════════════ -->
+<div class="page active" id="page-overview">
+  <div class="page-header">
+    <h1>Dashboard</h1>
+    <p id="overview-sub">Session summary</p>
+  </div>
+  <div class="stat-grid" id="stat-grid"></div>
+  <div class="chart-card">
+    <div class="chart-header">
+      <span class="chart-title">HONEY PER SECOND</span>
+      <div class="chart-controls">
+        <div class="color-pick">
+          <input type="color" id="col-hps" value="#f5c542" oninput="recolorChart('hpsChart', this.value, 'HPS')">
+          <span>line color</span>
+        </div>
+      </div>
+    </div>
+    <div class="chart-div" id="hpsChart"></div>
+  </div>
+  <div class="chart-card">
+    <div class="chart-header">
+      <span class="chart-title">POLLEN PER SECOND</span>
+      <div class="chart-controls">
+        <div class="color-pick">
+          <input type="color" id="col-pps" value="#4fc3f7" oninput="recolorChart('ppsChart', this.value, 'PPS')">
+          <span>line color</span>
+        </div>
+      </div>
+    </div>
+    <div class="chart-div" id="ppsChart"></div>
+  </div>
+</div>
+
+<!-- ════════════ HONEY & POLLEN ════════════ -->
+<div class="page" id="page-honey">
+  <div class="page-header">
+    <h1>Honey &amp; Pollen</h1>
+    <p>Earnings over session time</p>
+  </div>
+  <div class="chart-card">
+    <div class="chart-header">
+      <span class="chart-title">TOTAL HONEY EARNED</span>
+      <div class="color-pick">
+        <input type="color" id="col-honey" value="#ffb74d" oninput="recolorChart('honeyChart', this.value, 'Honey')">
+        <span>line color</span>
+      </div>
+    </div>
+    <div class="chart-div" id="honeyChart"></div>
+  </div>
+  <div class="chart-card">
+    <div class="chart-header">
+      <span class="chart-title">TOTAL POLLEN COLLECTED</span>
+      <div class="color-pick">
+        <input type="color" id="col-pollen" value="#4fc3f7" oninput="recolorChart('pollenChart', this.value, 'Pollen')">
+        <span>line color</span>
+      </div>
+    </div>
+    <div class="chart-div" id="pollenChart"></div>
+  </div>
+</div>
+
+<!-- ════════════ BALLOON ════════════ -->
+<div class="page" id="page-balloon">
+  <div class="page-header">
+    <h1>Balloon Pollen</h1>
+    <p>Pollen stored in the hive balloon — depletes during conversion</p>
+  </div>
+  <div class="chart-card">
+    <div class="chart-header">
+      <span class="chart-title">BALLOON POLLEN STORED</span>
+      <div class="color-pick">
+        <input type="color" id="col-balloon" value="#ce93d8" oninput="recolorChart('balloonChart', this.value, 'Balloon Pollen')">
+        <span>line color</span>
+      </div>
+    </div>
+    <div class="chart-div" id="balloonChart"></div>
+  </div>
+</div>
+
+<!-- ════════════ CAPACITY ════════════ -->
+<div class="page" id="page-capacity">
+  <div class="page-header">
+    <h1>Capacity</h1>
+    <p>Field capacity over time — dips indicate conversion periods</p>
+  </div>
+  <div class="chart-card">
+    <div class="chart-header">
+      <span class="chart-title">CAPACITY</span>
+      <div class="color-pick">
+        <input type="color" id="col-cap" value="#81c784" oninput="recolorChart('capChart', this.value, 'Capacity')">
+        <span>line color</span>
+      </div>
+    </div>
+    <div class="chart-div" id="capChart"></div>
+  </div>
+</div>
+
+<!-- ════════════ FIELD ════════════ -->
+<div class="page" id="page-field">
+  <div class="page-header">
+    <h1>Field Breakdown</h1>
+    <p>Time spent in each field</p>
+  </div>
+  <div class="chart-card">
+    <div class="chart-header"><span class="chart-title">TIME IN FIELD</span></div>
+    <div class="chart-div" id="fieldChart"></div>
+  </div>
+  <div class="chart-card">
+    <div class="chart-header"><span class="chart-title">FIELD SHARE</span></div>
+    <div class="field-list" id="fieldList"></div>
+  </div>
+</div>
+
+<!-- ════════════ COMBINED GRAPH ════════════ -->
+<div class="page" id="page-combined">
+  <div class="page-header">
+    <h1>Combined Graph</h1>
+    <p>Mix any stats on one chart — toggle series, pick colors, each gets its own Y axis</p>
+  </div>
+  <div class="chart-card">
+    <div class="chart-header">
+      <span class="chart-title">SERIES</span>
+      <button class="btn primary" onclick="renderCombinedGraph()">Update</button>
+    </div>
+    <div id="comboSeriesRow" style="display:flex;flex-wrap:wrap;gap:8px;padding:12px;background:var(--surface2);border-radius:6px;margin-bottom:16px"></div>
+    <div class="chart-div" id="combinedChart"></div>
+  </div>
+</div>
+
+<!-- ════════════ GRAPH WINDOWS ════════════ -->
+<div class="page" id="page-windows">
+  <div class="page-header">
+    <h1>Graph Windows</h1>
+    <p>Create multiple independent graphs — all included when you save as HTML</p>
+  </div>
+  <div style="display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap">
+    <button class="btn primary" onclick="addGraphWindow()">+ Add Window</button>
+    <button class="btn" onclick="collapseAllWindows()">Collapse All</button>
+    <button class="btn" onclick="expandAllWindows()">Expand All</button>
+  </div>
+  <div id="windowsContainer"></div>
+</div>
+
+<!-- ════════════ TILE BROWSER ════════════ -->
+<div class="page" id="page-tiles">
+  <div class="page-header">
+    <h1>Tile Browser</h1>
+    <p>All tiles logged this session — click to select for graphing, right-click to ignore</p>
+  </div>
+
+  <div class="ignore-panel">
+    <h3>Ignored tiles</h3>
+    <div class="ignore-chips" id="ignoreChips">
+      <span class="empty-ignore">None ignored</span>
+    </div>
+  </div>
+
+  <div class="tile-controls">
+    <input class="search-box" id="tileSearch" placeholder="Search by name or ID…" oninput="filterTiles()">
+    <button class="btn" onclick="clearTileSelection()">Clear selection</button>
+    <button class="btn primary" onclick="graphSelected()">Graph selected →</button>
+  </div>
+
+  <div class="tile-grid" id="tileGrid"></div>
+</div>
+
+<!-- ════════════ TILE GRAPHS ════════════ -->
+<div class="page" id="page-tilegraphs">
+  <div class="page-header">
+    <h1>Tile Graphs</h1>
+    <p>Multiplier over time for selected tiles</p>
+  </div>
+
+  <div class="graph-builder">
+    <h3>Graph mode</h3>
+    <div class="graph-mode-row">
+      <button class="mode-btn active" id="mode-combined" onclick="setGraphMode('combined', this)">Combined (all on one graph)</button>
+      <button class="mode-btn" id="mode-separate" onclick="setGraphMode('separate', this)">Separate (one graph per tile)</button>
+    </div>
+    <button class="btn primary" onclick="renderTileGraphs()">Render graphs</button>
+  </div>
+
+  <div id="tileGraphsContainer"></div>
+</div>
+
+</main>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// DATA
+// ─────────────────────────────────────────────────────────────────────────────
+const SESSIONS = {data_json};
+let activeSession = 0;
+let activeLogIdx  = -1;   // -1 = combined view, 0..N = specific hour
+let graphMode = 'combined';
+const ignoreList  = new Set();
+const tileColors  = {{}};
+const selectedTiles = new Set();
+
+function activeLog() {{
+  const s = SESSIONS[activeSession];
+  return activeLogIdx === -1 ? s.combined : s.hours[activeLogIdx];
+}}
+
+const PLOTLY_LAYOUT_BASE = {{
+  paper_bgcolor: 'transparent',
+  plot_bgcolor:  'transparent',
+  font:         {{ family: 'JetBrains Mono, monospace', color: '#e8e8f0', size: 11 }},
+  xaxis:        {{ gridcolor: '#2a2a38', linecolor: '#2a2a38', tickcolor: '#6b6b80', zeroline: false }},
+  yaxis:        {{ gridcolor: '#2a2a38', linecolor: '#2a2a38', tickcolor: '#6b6b80', zeroline: false }},
+  margin:       {{ t: 10, b: 40, l: 60, r: 20 }},
+  legend:       {{ bgcolor: 'transparent', font: {{ size: 10 }} }},
+  hovermode:    'x unified',
+  hoverlabel:   {{ bgcolor: '#18181f', bordercolor: '#2a2a38', font: {{ family: 'JetBrains Mono', size: 11 }} }},
+}};
+
+const PLOTLY_CONFIG = {{ responsive: true, displayModeBar: false }};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UTILS
+// ─────────────────────────────────────────────────────────────────────────────
+function toast(msg) {{
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2200);
+}}
+
+function fmtDuration(s) {{
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${{h}}h ${{m}}m ${{sec}}s`;
+  if (m > 0) return `${{m}}m ${{sec}}s`;
+  return `${{sec}}s`;
+}}
+
+function fmtNum(n) {{
+  n = Math.floor(n);
+  if (n >= 1e9) return (n/1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n/1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+  return n.toString();
+}}
+
+function randomColor() {{
+  const h = Math.floor(Math.random() * 360);
+  return `hsl(${{h}}, 70%, 60%)`;
+}}
+
+function getTileColor(id) {{
+  if (!tileColors[id]) tileColors[id] = randomColor();
+  return tileColors[id];
+}}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSION TABS + LOG NAVIGATOR
+// ─────────────────────────────────────────────────────────────────────────────
+function buildSessionTabs() {{
+  const container = document.getElementById('sessionTabs');
+  container.innerHTML = '';
+  SESSIONS.forEach((s, i) => {{
+    const btn = document.createElement('button');
+    btn.className = 'sess-tab' + (i === activeSession ? ' active' : '');
+    btn.textContent = s.label;
+    btn.onclick = () => {{
+      activeSession = i;
+      activeLogIdx  = -1;
+      document.querySelectorAll('.sess-tab').forEach((b, j) =>
+        b.classList.toggle('active', j === i));
+      buildLogNavigator();
+      renderAll();
+    }};
+    container.appendChild(btn);
+  }});
+  buildLogNavigator();
+}}
+
+function buildLogNavigator() {{
+  let nav = document.getElementById('logNav');
+  if (!nav) {{
+    nav = document.createElement('div');
+    nav.id = 'logNav';
+    nav.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:20px';
+    document.getElementById('sessionTabs').insertAdjacentElement('afterend', nav);
+  }}
+
+  const s = SESSIONS[activeSession];
+  const hours = s.hours || [];
+  const label = activeLogIdx === -1
+    ? 'All Hours'
+    : `Log ${{activeLogIdx + 1}} of ${{hours.length}} — ${{hours[activeLogIdx].label}}`;
+
+  nav.innerHTML = `
+    <button class="btn ${{activeLogIdx === -1 ? 'primary' : ''}}" onclick="setLogIdx(-1)">All Hours</button>
+    <button class="btn" onclick="stepLog(-1)" ${{hours.length === 0 ? 'disabled' : ''}}>← Prev</button>
+    <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--muted);min-width:180px;text-align:center">${{label}}</span>
+    <button class="btn" onclick="stepLog(1)"  ${{hours.length === 0 ? 'disabled' : ''}}>Next →</button>
+    <span style="font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace;margin-left:4px">${{hours.length}} hour log${{hours.length !== 1 ? 's' : ''}} in session</span>
+  `;
+}}
+
+function setLogIdx(idx) {{
+  activeLogIdx = idx;
+  buildLogNavigator();
+  renderAll();
+  renderActivePage();
+}}
+
+function stepLog(dir) {{
+  const s = SESSIONS[activeSession];
+  const hours = s.hours || [];
+  if (!hours.length) return;
+  if (activeLogIdx === -1) {{
+    activeLogIdx = dir === 1 ? 0 : hours.length - 1;
+  }} else {{
+    activeLogIdx = (activeLogIdx + dir + hours.length) % hours.length;
+  }}
+  buildLogNavigator();
+  renderAll();
+  renderActivePage();
+}}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NAV
+// ─────────────────────────────────────────────────────────────────────────────
+let activePage = 'overview';
+
+function showPage(name, btn) {{
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  btn.classList.add('active');
+  activePage = name;
+  renderPageSpecific(name);
+}}
+
+function renderActivePage() {{
+  renderPageSpecific(activePage);
+}}
+
+function renderPageSpecific(name) {{
+  const log = activeLog();
+  if (name === 'overview')   renderOverview(log);
+  if (name === 'balloon')    renderBalloonPage(log);
+  if (name === 'combined')   renderCombinedPage(log);
+  if (name === 'windows')    renderWindowsPage();
+  if (name === 'tiles')      renderTileBrowser(log);
+  if (name === 'tilegraphs') renderTileGraphs();
+  if (name === 'field')      renderFieldPage(log);
+  if (name === 'capacity')   renderCapacityPage(log);
+  if (name === 'honey')      renderHoneyPage(log);
+}}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHART HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+function lineTrace(x, y, name, color, fill) {{
+  return {{
+    x, y, name,
+    type: 'scatter', mode: 'lines',
+    line: {{ color, width: 2, shape: 'spline', smoothing: 0.4 }},
+    fill: fill ? 'tozeroy' : 'none',
+    fillcolor: fill ? hexToRgba(color, 0.07) : undefined,
+    hovertemplate: `%{{y:.1f}}<extra>${{name}}</extra>`,
+  }};
+}}
+
+function hexToRgba(hex, alpha) {{
+  const r = parseInt(hex.slice(1,3),16);
+  const g = parseInt(hex.slice(3,5),16);
+  const b = parseInt(hex.slice(5,7),16);
+  return `rgba(${{r}},${{g}},${{b}},${{alpha}})`;
+}}
+
+function recolorChart(divId, color, traceName) {{
+  const el = document.getElementById(divId);
+  if (!el || !el.data) return;
+  const idx = el.data.findIndex(t => t.name === traceName);
+  if (idx < 0) return;
+  Plotly.restyle(divId, {{
+    'line.color': [color],
+    fillcolor: [hexToRgba(color, 0.07)],
+  }}, [idx]);
+}}
+
+function addConvertingShapes(stats) {{
+  const shapes = [];
+  let start = null;
+  stats.stats.timestamps.forEach((t, i) => {{
+    const c = stats.stats.converting[i];
+    if (c === true || c === 'true' || c === 'True') {{
+      if (!start) start = t;
+    }} else {{
+      if (start) {{
+        shapes.push({{
+          type: 'rect', xref: 'x', yref: 'paper',
+          x0: start, x1: t, y0: 0, y1: 1,
+          fillcolor: 'rgba(240,98,146,0.07)',
+          line: {{ width: 0 }},
+        }});
+        start = null;
+      }}
+    }}
+  }});
+  return shapes;
+}}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HONEY PAGE
+// ─────────────────────────────────────────────────────────────────────────────
+function renderHoneyPage(s) {{
+  const ts     = s.stats.timestamps;
+  const shapes = addConvertingShapes(s);
+
+  // Normalise honey to start from 0
+  const honeyBase = s.stats.honey[0] || 0;
+  const honeyRel  = s.stats.honey.map(v => v - honeyBase);
+
+  Plotly.newPlot('honeyChart',
+    [lineTrace(ts, honeyRel, 'Honey', document.getElementById('col-honey').value, true)],
+    {{ ...PLOTLY_LAYOUT_BASE, height: 280, shapes,
+       yaxis: {{ ...PLOTLY_LAYOUT_BASE.yaxis, title:'Honey Earned' }} }},
+    PLOTLY_CONFIG);
+
+  Plotly.newPlot('pollenChart',
+    [lineTrace(ts, s.stats.pollen, 'Pollen', document.getElementById('col-pollen').value, true)],
+    {{ ...PLOTLY_LAYOUT_BASE, height: 280, shapes,
+       yaxis: {{ ...PLOTLY_LAYOUT_BASE.yaxis, title:'Pollen' }} }},
+    PLOTLY_CONFIG);
+}}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CAPACITY PAGE
+// ─────────────────────────────────────────────────────────────────────────────
+function renderCapacityPage(s) {{
+  const ts     = s.stats.timestamps;
+  const shapes = addConvertingShapes(s);
+  Plotly.newPlot('capChart',
+    [lineTrace(ts, s.stats.capacity, 'Capacity', document.getElementById('col-cap').value, true)],
+    {{ ...PLOTLY_LAYOUT_BASE, height: 320, shapes,
+       yaxis: {{ ...PLOTLY_LAYOUT_BASE.yaxis, title:'Capacity' }} }},
+    PLOTLY_CONFIG);
+}}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BALLOON PAGE
+// ─────────────────────────────────────────────────────────────────────────────
+function renderBalloonPage(log) {{
+  const ts      = log.stats.timestamps;
+  const raw     = log.stats.balloon_pollen || [];
+  const shapes  = addConvertingShapes(log);
+
+  // Replace null/NaN with null so Plotly renders gaps instead of zero
+  const balloon = raw.map(v => (v === null || isNaN(v)) ? null : v);
+
+  if (balloon.every(v => v === null)) {{
+    document.getElementById('balloonChart').innerHTML =
+      '<div class="empty-state" style="padding:40px"><div class="icon">🎈</div>No balloon data in this log.<br>Balloon is only present when converted.</div>';
+    return;
+  }}
+
+  Plotly.newPlot('balloonChart',
+    [{{
+      x: ts,
+      y: balloon,
+      name: 'Balloon Pollen',
+      type: 'scatter',
+      mode: 'lines',
+      line: {{ color: document.getElementById('col-balloon').value, width: 2, shape: 'spline', smoothing: 0.4 }},
+      fill: 'tozeroy',
+      fillcolor: hexToRgba(document.getElementById('col-balloon').value, 0.07),
+      connectgaps: false,
+      hovertemplate: '%{{y:,.0f}}<extra>Balloon Pollen</extra>',
+    }}],
+    {{ ...PLOTLY_LAYOUT_BASE, height: 320, shapes,
+       yaxis: {{ ...PLOTLY_LAYOUT_BASE.yaxis, title: 'Pollen Stored' }} }},
+    PLOTLY_CONFIG);
+}}
+// ─────────────────────────────────────────────────────────────────────────────
+function renderFieldPage(s) {{
+  const fields = s.summary.fields || {{}};
+  const total  = Object.values(fields).reduce((a,b) => a+b, 0) || 1;
+  const names  = Object.keys(fields);
+  const counts = names.map(n => fields[n]);
+  const pcts   = counts.map(c => ((c/total)*100).toFixed(1));
+
+  // Bar chart
+  Plotly.newPlot('fieldChart', [{{
+    x: counts, y: names, type: 'bar', orientation: 'h',
+    marker: {{ color: '#f5c542', opacity: 0.85 }},
+    hovertemplate: '%{{x}} seconds<extra>%{{y}}</extra>',
+  }}], {{
+    ...PLOTLY_LAYOUT_BASE, height: Math.max(200, names.length * 36 + 60),
+    xaxis: {{ ...PLOTLY_LAYOUT_BASE.xaxis, title: 'Seconds' }},
+    margin: {{ t:10, b:50, l:160, r:20 }},
+  }}, PLOTLY_CONFIG);
+
+  // Text bars
+  const list = document.getElementById('fieldList');
+  const maxC = Math.max(...counts, 1);
+  list.innerHTML = names.map((n,i) => `
+    <div class="field-row">
+      <div class="field-name">${{n}}</div>
+      <div class="field-bar-bg">
+        <div class="field-bar-fill" style="width:${{(counts[i]/maxC*100).toFixed(1)}}%"></div>
+      </div>
+      <div class="field-pct">${{pcts[i]}}%</div>
+    </div>`).join('');
+}}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TILE BROWSER
+// ─────────────────────────────────────────────────────────────────────────────
+function renderTileBrowser(log) {{
+  const grid = document.getElementById('tileGrid');
+  const tiles = (log.tile_summaries || []).filter(t => !ignoreList.has(t.asset_id));
+
+  if (!tiles.length) {{
+    grid.innerHTML = '<div class="empty-state"><div class="icon">🍯</div>No tile data for this session.</div>';
+    return;
+  }}
+
+  grid.innerHTML = tiles.map(t => {{
+    const sel  = selectedTiles.has(t.asset_id);
+    const col  = getTileColor(t.asset_id);
+    const img  = t.image
+      ? `<img class="tile-img" src="${{t.image}}" alt="${{t.name}}">`
+      : `<div class="tile-img-placeholder">🍀</div>`;
+
+    return `
+    <div class="tile-card ${{sel ? 'selected' : ''}}"
+         id="tc-${{t.asset_id}}"
+         onclick="toggleTileSelect('${{t.asset_id}}')"
+         oncontextmenu="ignoreTile('${{t.asset_id}}', '${{t.name.replace(/'/g,\"\\\\'\")}}')"
+         title="Right-click to ignore">
+      <div class="tile-sel-badge">✓</div>
+      <div class="tile-top">
+        ${{img}}
+        <div class="tile-info">
+          <div class="tile-name">${{t.name}}</div>
+          <div class="tile-id">#${{t.asset_id}}</div>
+          <div class="tile-color-row">
+            <input type="color" value="${{col}}"
+              onclick="event.stopPropagation()"
+              oninput="setTileColor('${{t.asset_id}}', this.value)"
+              title="Line color">
+            <span class="tile-color-label">graph color</span>
+          </div>
+        </div>
+      </div>
+      <div class="tile-stats">
+        <div class="tile-stat">
+          <div class="tile-stat-label">Active time</div>
+          <div class="tile-stat-val">${{fmtDuration(t.total_active_s)}}</div>
+        </div>
+        <div class="tile-stat">
+          <div class="tile-stat-label">Peak mult</div>
+          <div class="tile-stat-val">x${{t.peak_mult}}</div>
+        </div>
+        <div class="tile-stat">
+          <div class="tile-stat-label">Appearances</div>
+          <div class="tile-stat-val">${{t.appearances}}</div>
+        </div>
+        <div class="tile-stat">
+          <div class="tile-stat-label">First seen</div>
+          <div class="tile-stat-val" style="font-size:10px">${{t.first_seen.slice(11,16)}}</div>
+        </div>
+      </div>
+    </div>`;
+  }}).join('');
+}}
+
+function filterTiles() {{
+  const q = document.getElementById('tileSearch').value.toLowerCase();
+  document.querySelectorAll('#tileGrid .tile-card').forEach(card => {{
+    const name = card.querySelector('.tile-name')?.textContent.toLowerCase() || '';
+    const id   = card.querySelector('.tile-id')?.textContent.toLowerCase() || '';
+    card.style.display = (name.includes(q) || id.includes(q)) ? '' : 'none';
+  }});
+}}
+
+function toggleTileSelect(id) {{
+  if (selectedTiles.has(id)) selectedTiles.delete(id);
+  else selectedTiles.add(id);
+  const card = document.getElementById('tc-' + id);
+  if (card) card.classList.toggle('selected', selectedTiles.has(id));
+}}
+
+function clearTileSelection() {{
+  selectedTiles.clear();
+  document.querySelectorAll('.tile-card.selected').forEach(c => c.classList.remove('selected'));
+}}
+
+function setTileColor(id, color) {{
+  tileColors[id] = color;
+}}
+
+function ignoreTile(id, name) {{
+  event.preventDefault();
+  ignoreList.add(id);
+  selectedTiles.delete(id);
+  renderTileBrowser(activeLog());
+  renderIgnoreChips();
+  toast(`Ignored: ${{name}}`);
+}}
+
+function renderIgnoreChips() {{
+  const container = document.getElementById('ignoreChips');
+  if (!ignoreList.size) {{
+    container.innerHTML = '<span class="empty-ignore">None ignored</span>';
+    return;
+  }}
+  container.innerHTML = [...ignoreList].map(id => {{
+    const log  = activeLog();
+    const tile = (log.tile_summaries||[]).find(t => t.asset_id === id);
+    const label = tile ? tile.name : id;
+    return `<div class="ignore-chip">
+      ${{label}}
+      <button onclick="unignoreTile('${{id}}')" title="Remove from ignore">×</button>
+    </div>`;
+  }}).join('');
+}}
+
+function unignoreTile(id) {{
+  ignoreList.delete(id);
+  renderTileBrowser(activeLog());
+  renderIgnoreChips();
+}}
+
+function graphSelected() {{
+  if (!selectedTiles.size) {{ toast('Select at least one tile first'); return; }}
+  showPage('tilegraphs', document.querySelector('.nav-btn[onclick*="tilegraphs"]'));
+  renderTileGraphs();
+}}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TILE GRAPHS
+// ─────────────────────────────────────────────────────────────────────────────
+function setGraphMode(mode, btn) {{
+  graphMode = mode;
+  document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}}
+
+function renderTileGraphs() {{
+  const container = document.getElementById('tileGraphsContainer');
+  const log = activeLog();
+  const tiles = (log.tile_summaries || [])
+    .filter(t => selectedTiles.has(t.asset_id) && !ignoreList.has(t.asset_id));
+
+  if (!tiles.length) {{
+    container.innerHTML = '<div class="empty-state"><div class="icon">📊</div>No tiles selected.<br>Go to Tile Browser and select tiles first.</div>';
+    return;
+  }}
+
+  container.innerHTML = '';
+
+  if (graphMode === 'combined') {{
+    // All tiles on a single graph
+    const wrapper = document.createElement('div');
+    wrapper.className = 'chart-card';
+    wrapper.innerHTML = `
+      <div class="chart-header">
+        <span class="chart-title">TILE MULTIPLIERS — COMBINED</span>
+      </div>
+      <div class="tile-img-row" id="combined-imgs" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px"></div>
+      <div class="chart-div" id="tileGraphCombined"></div>`;
+    container.appendChild(wrapper);
+
+    // Asset images row
+    const imgRow = wrapper.querySelector('#combined-imgs');
+    tiles.forEach(t => {{
+      const col = getTileColor(t.asset_id);
+      const img = t.image
+        ? `<img src="${{t.image}}" style="width:40px;height:40px;border-radius:6px;border:2px solid ${{col}};object-fit:cover">`
+        : `<div style="width:40px;height:40px;border-radius:6px;border:2px solid ${{col}};background:#18181f;display:flex;align-items:center;justify-content:center;font-size:18px">🍀</div>`;
+      imgRow.innerHTML += `<div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+        ${{img}}
+        <span style="font-size:10px;color:${{col}};font-family:'JetBrains Mono',monospace;max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${{t.name}}">${{t.name}}</span>
+      </div>`;
+    }});
+
+    const traces = tiles.map(t => buildTileTrace(t));
+    Plotly.newPlot('tileGraphCombined', traces,
+      {{ ...PLOTLY_LAYOUT_BASE, height: 320,
+         yaxis: {{ ...PLOTLY_LAYOUT_BASE.yaxis, title: 'Multiplier', tickformat: 'd' }} }},
+      PLOTLY_CONFIG);
+
+  }} else {{
+    // Separate graph per tile
+    tiles.forEach((t, i) => {{
+      const col = getTileColor(t.asset_id);
+      const img = t.image
+        ? `<img src="${{t.image}}" style="width:52px;height:52px;border-radius:8px;border:2px solid ${{col}};object-fit:cover;flex-shrink:0">`
+        : `<div style="width:52px;height:52px;border-radius:8px;border:2px solid ${{col}};background:#18181f;display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0">🍀</div>`;
+
+      const wrapper = document.createElement('div');
+      wrapper.className = 'chart-card';
+      wrapper.innerHTML = `
+        <div class="chart-header">
+          <div style="display:flex;align-items:center;gap:12px">
+            ${{img}}
+            <div>
+              <div class="chart-title">${{t.name.toUpperCase()}}</div>
+              <div style="font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace;margin-top:3px">
+                #${{t.asset_id}} · active ${{fmtDuration(t.total_active_s)}} · peak x${{t.peak_mult}}
+              </div>
+            </div>
+          </div>
+          <div class="color-pick">
+            <input type="color" value="${{col}}"
+              oninput="setTileColor('${{t.asset_id}}', this.value); renderTileGraphs()"
+              title="Line color">
+            <span>color</span>
+          </div>
+        </div>
+        <div class="chart-div" id="tileGraph-${{t.asset_id}}"></div>`;
+      container.appendChild(wrapper);
+
+      Plotly.newPlot(`tileGraph-${{t.asset_id}}`, [buildTileTrace(t)],
+        {{ ...PLOTLY_LAYOUT_BASE, height: 260, showlegend: false,
+           yaxis: {{ ...PLOTLY_LAYOUT_BASE.yaxis, title: 'Multiplier', tickformat: 'd' }} }},
+        PLOTLY_CONFIG);
+    }});
+  }}
+}}
+
+function buildTileTrace(t) {{
+  // Build a step trace from timestamps+states+multipliers
+  const x = [], y = [];
+  let curMult = 0;
+  t.timestamps.forEach((ts, i) => {{
+    const state = t.states[i];
+    const mult  = t.multipliers[i];
+    x.push(ts);
+    y.push(curMult);  // value just before this event
+    if (state === 'Active')  curMult = mult;
+    if (state === 'Removed') curMult = 0;
+    x.push(ts);
+    y.push(curMult);  // value just after this event
+  }});
+  return {{
+    x, y,
+    name: t.name,
+    type: 'scatter',
+    mode: 'lines',
+    line: {{ color: getTileColor(t.asset_id), width: 2, shape: 'hv' }},
+    fill: 'tozeroy',
+    fillcolor: hexToRgba(getTileColor(t.asset_id), 0.1),
+    hovertemplate: `x%{{y:.0f}}<extra>${{t.name}}</extra>`,
+  }};
+}}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OVERVIEW  (updated to show avg + current)
+// ─────────────────────────────────────────────────────────────────────────────
+function renderOverview(s) {{
+  const sum = s.summary;
+  document.getElementById('overview-sub').textContent =
+    s.label + (sum.duration_s ? ' · ' + fmtDuration(sum.duration_s) : '');
+
+  const cards = [
+    {{ label:'Total Honey', value: fmtNum(sum.honey_gained||0), sub:'earned this session', accent:'#ffb74d' }},
+    {{ label:'Peak H/s',    value: fmtNum(sum.peak_hps||0),     sub:'honey per second',   accent:'#f5c542' }},
+    {{ label:'Avg H/s',     value: fmtNum(sum.avg_hps||0),      sub:'average rate',       accent:'#f5c542' }},
+    {{ label:'H/hour',      value: fmtNum((sum.avg_hps||0)*3600), sub:'projected',         accent:'#e5b530' }},
+    {{ label:'Peak Cap',    value: fmtNum(sum.peak_capacity||0), sub:'max capacity seen',  accent:'#81c784' }},
+    {{ label:'Converting',  value: (sum.converting_pct||0)+'%',  sub:'of session time',   accent:'#f06292' }},
+    {{ label:'Runtime',     value: fmtDuration(sum.duration_s||0), sub:'total',           accent:'#4fc3f7' }},
+  ];
+
+  const grid = document.getElementById('stat-grid');
+  grid.innerHTML = cards.map(c => `
+    <div class="stat-card" style="--card-accent:${{c.accent}}">
+      <div class="stat-label">${{c.label}}</div>
+      <div class="stat-value">${{c.value}}</div>
+      <div class="stat-sub">${{c.sub}}</div>
+    </div>`).join('');
+
+  const shapes = addConvertingShapes(s);
+  const ts = s.stats.timestamps;
+
+  // HPS: avg + current if available
+  const hpsTraces = [lineTrace(ts, s.stats.hps, 'H/s avg', document.getElementById('col-hps').value, true)];
+  if (s.stats.current_hps && s.stats.current_hps.some(v => v !== null))
+    hpsTraces.push(lineTrace(ts, s.stats.current_hps, 'H/s current', '#ffe082', false));
+  Plotly.newPlot('hpsChart', hpsTraces, {{ ...PLOTLY_LAYOUT_BASE, height: 220, shapes }}, PLOTLY_CONFIG);
+
+  // PPS: avg + current if available
+  const ppsTraces = [lineTrace(ts, s.stats.pps, 'P/s avg', document.getElementById('col-pps').value, true)];
+  if (s.stats.current_pps && s.stats.current_pps.some(v => v !== null))
+    ppsTraces.push(lineTrace(ts, s.stats.current_pps, 'P/s current', '#80deea', false));
+  Plotly.newPlot('ppsChart', ppsTraces, {{ ...PLOTLY_LAYOUT_BASE, height: 220, shapes }}, PLOTLY_CONFIG);
+}}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMBINED GRAPH
+// ─────────────────────────────────────────────────────────────────────────────
+const COMBO_SERIES = [
+  {{ key:'hps',           label:'H/s avg',       color:'#f5c542', on:true  }},
+  {{ key:'current_hps',   label:'H/s current',   color:'#ffe082', on:false }},
+  {{ key:'pps',           label:'P/s avg',        color:'#4fc3f7', on:false }},
+  {{ key:'current_pps',   label:'P/s current',    color:'#80deea', on:false }},
+  {{ key:'honey',         label:'Total Honey',    color:'#ffb74d', on:false, normalize:true }},
+  {{ key:'pollen',        label:'Pollen in Bag',  color:'#81c784', on:false }},
+  {{ key:'capacity',      label:'Capacity',       color:'#ce93d8', on:false }},
+  {{ key:'balloon_pollen',label:'Balloon Pollen', color:'#f06292', on:false }},
+];
+
+function buildSeriesRow(containerId, series, onUpdate) {{
+  const row = document.getElementById(containerId);
+  if (!row) return;
+  row.innerHTML = series.map((s, i) => `
+    <label class="series-pill ${{s.on ? 'on' : ''}}" id="sp-${{containerId}}-${{i}}">
+      <input type="checkbox" ${{s.on ? 'checked' : ''}}
+        onchange="(function(cb){{
+          const s=COMBO_SERIES[${{i}}]; s.on=cb.checked;
+          cb.closest('label').classList.toggle('on',cb.checked);
+          ${{onUpdate}};
+        }})(this)">
+      <input type="color" value="${{s.color}}" onclick="event.stopPropagation()"
+        oninput="COMBO_SERIES[${{i}}].color=this.value; ${{onUpdate}}">
+      ${{s.label}}
+    </label>`).join('');
+}}
+
+function renderCombinedPage(log) {{
+  buildSeriesRow('comboSeriesRow', COMBO_SERIES, 'renderCombinedGraph()');
+  renderCombinedGraph();
+}}
+
+function renderCombinedGraph() {{
+  const s = activeLog();
+  const ts = s.stats.timestamps;
+  const shapes = addConvertingShapes(s);
+  const traces = [];
+  const layout = {{ ...PLOTLY_LAYOUT_BASE, height: 380, shapes }};
+  let axIdx = 1;
+
+  COMBO_SERIES.filter(sr => sr.on).forEach(sr => {{
+    let data = s.stats[sr.key];
+    if (!data || !data.length) return;
+    if (sr.normalize) {{ const base = data[0] || 0; data = data.map(v => v - base); }}
+    const ykey = axIdx === 1 ? 'y' : 'y' + axIdx;
+    if (axIdx > 1) {{
+      layout['yaxis' + axIdx] = {{
+        ...PLOTLY_LAYOUT_BASE.yaxis,
+        overlaying: 'y',
+        side: axIdx % 2 === 0 ? 'right' : 'left',
+        showgrid: false,
+        title: sr.label,
+      }};
+      layout.margin = {{ t:10, b:40, l:60, r:60 }};
+    }}
+    traces.push({{
+      x: ts, y: data, name: sr.label, type: 'scatter', mode: 'lines',
+      line: {{ color: sr.color, width: 2, shape: 'spline', smoothing: 0.4 }},
+      fill: axIdx === 1 ? 'tozeroy' : 'none',
+      fillcolor: axIdx === 1 ? hexToRgba(sr.color, 0.06) : undefined,
+      yaxis: ykey,
+      hovertemplate: `%{{y:.1f}}<extra>${{sr.label}}</extra>`,
+    }});
+    axIdx++;
+  }});
+
+  if (!traces.length) {{
+    document.getElementById('combinedChart').innerHTML =
+      '<div class="empty-state" style="padding:40px"><div class="icon">📊</div>Select at least one series above.</div>';
+    return;
+  }}
+  Plotly.newPlot('combinedChart', traces, layout, PLOTLY_CONFIG);
+}}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GRAPH WINDOWS
+// ─────────────────────────────────────────────────────────────────────────────
+let _winId = 0;
+const graphWindows = [];
+
+const WIN_SERIES_DEFS = [
+  {{ key:'hps',           label:'H/s avg',       color:'#f5c542' }},
+  {{ key:'current_hps',   label:'H/s current',   color:'#ffe082' }},
+  {{ key:'pps',           label:'P/s avg',        color:'#4fc3f7' }},
+  {{ key:'current_pps',   label:'P/s current',    color:'#80deea' }},
+  {{ key:'honey',         label:'Total Honey',    color:'#ffb74d', normalize:true }},
+  {{ key:'pollen',        label:'Pollen in Bag',  color:'#81c784' }},
+  {{ key:'capacity',      label:'Capacity',       color:'#ce93d8' }},
+  {{ key:'balloon_pollen',label:'Balloon Pollen', color:'#f06292' }},
+];
+
+function addGraphWindow(preset) {{
+  const id = ++_winId;
+  const win = {{
+    id,
+    title: preset?.title || ('Window ' + id),
+    collapsed: false,
+    series: WIN_SERIES_DEFS.map((s, i) => ({{...s, on: i === 0}})),
+  }};
+  graphWindows.push(win);
+  rebuildWindowsContainer();
+  renderWindowGraph(win.id);
+}}
+
+function removeWindow(id) {{
+  const i = graphWindows.findIndex(w => w.id === id);
+  if (i >= 0) graphWindows.splice(i, 1);
+  rebuildWindowsContainer();
+}}
+
+function collapseAllWindows() {{ graphWindows.forEach(w => w.collapsed = true); rebuildWindowsContainer(); }}
+function expandAllWindows()   {{ graphWindows.forEach(w => w.collapsed = false); rebuildWindowsContainer(); rebuildWindowsContainer(); graphWindows.forEach(w => renderWindowGraph(w.id)); }}
+
+function rebuildWindowsContainer() {{
+  const container = document.getElementById('windowsContainer');
+  if (!container) return;
+  if (!graphWindows.length) {{
+    container.innerHTML = '<div class="empty-state"><div class="icon">📊</div>No windows yet — click + Add Window.</div>';
+    return;
+  }}
+  container.innerHTML = '';
+  graphWindows.forEach(win => {{
+    const card = document.createElement('div');
+    card.className = 'win-card';
+    card.id = 'win-' + win.id;
+
+    const seriesHTML = win.series.map((s, i) => `
+      <label class="series-pill ${{s.on ? 'on' : ''}}" id="wsp-${{win.id}}-${{i}}">
+        <input type="checkbox" ${{s.on ? 'checked' : ''}} onchange="(function(cb,wid,si){{
+          graphWindows.find(w=>w.id===wid).series[si].on=cb.checked;
+          cb.closest('label').classList.toggle('on',cb.checked);
+          renderWindowGraph(wid);
+        }})(this,${{win.id}},${{i}})">
+        <input type="color" value="${{s.color}}" onclick="event.stopPropagation()"
+          oninput="(function(v,wid,si){{
+            graphWindows.find(w=>w.id===wid).series[si].color=v;
+            renderWindowGraph(wid);
+          }})(this.value,${{win.id}},${{i}})">
+        ${{s.label}}
+      </label>`).join('');
+
+    card.innerHTML = `
+      <div class="win-controls">
+        <input class="win-title-input" value="${{win.title}}"
+          oninput="graphWindows.find(w=>w.id===${{win.id}}).title=this.value">
+        <div style="display:flex;gap:6px">
+          <button class="btn" onclick="(function(wid){{
+            const w=graphWindows.find(x=>x.id===wid);
+            w.collapsed=!w.collapsed;
+            rebuildWindowsContainer();
+            if(!w.collapsed)renderWindowGraph(wid);
+          }})(${{win.id}})">${{win.collapsed ? '▼ Expand' : '▲ Collapse'}}</button>
+          <button class="btn danger" onclick="removeWindow(${{win.id}})">✕ Remove</button>
+        </div>
+      </div>
+      ${{win.collapsed ? '<div style="color:var(--muted);font-size:12px;font-family:var(--font-mono)">Collapsed</div>' : `
+        <div class="win-series-row">${{seriesHTML}}</div>
+        <div class="chart-div" id="wingraph-${{win.id}}"></div>
+      `}}`;
+    container.appendChild(card);
+  }});
+}}
+
+function renderWindowGraph(id) {{
+  const win = graphWindows.find(w => w.id === id);
+  const el  = document.getElementById('wingraph-' + id);
+  if (!win || !el) return;
+  const s  = activeLog();
+  const ts = s.stats.timestamps;
+  const shapes = addConvertingShapes(s);
+  const traces = [];
+  const layout = {{ ...PLOTLY_LAYOUT_BASE, height: 300, shapes }};
+  let axIdx = 1;
+
+  win.series.filter(sr => sr.on).forEach(sr => {{
+    let data = s.stats[sr.key];
+    if (!data || !data.length) return;
+    if (sr.normalize) {{ const base = data[0] || 0; data = data.map(v => v - base); }}
+    const ykey = axIdx === 1 ? 'y' : 'y' + axIdx;
+    if (axIdx > 1) {{
+      layout['yaxis' + axIdx] = {{
+        ...PLOTLY_LAYOUT_BASE.yaxis,
+        overlaying: 'y',
+        side: axIdx % 2 === 0 ? 'right' : 'left',
+        showgrid: false,
+      }};
+      layout.margin = {{ t:10, b:40, l:60, r:60 }};
+    }}
+    traces.push({{
+      x: ts, y: data, name: sr.label, type: 'scatter', mode: 'lines',
+      line: {{ color: sr.color, width: 2, shape: 'spline', smoothing: 0.4 }},
+      fill: axIdx === 1 ? 'tozeroy' : 'none',
+      fillcolor: axIdx === 1 ? hexToRgba(sr.color, 0.06) : undefined,
+      yaxis: ykey,
+      hovertemplate: `%{{y:.1f}}<extra>${{sr.label}}</extra>`,
+    }});
+    axIdx++;
+  }});
+
+  if (!traces.length) {{
+    el.innerHTML = '<div style="padding:30px;text-align:center;color:var(--muted);font-family:var(--font-mono);font-size:12px">No series selected.</div>';
+    return;
+  }}
+  Plotly.newPlot('wingraph-' + id, traces, layout, PLOTLY_CONFIG);
+}}
+
+function renderWindowsPage() {{
+  rebuildWindowsContainer();
+  graphWindows.filter(w => !w.collapsed).forEach(w => renderWindowGraph(w.id));
+}}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SAVE AS HTML (snapshot)
+// ─────────────────────────────────────────────────────────────────────────────
+async function saveSnapshot() {{
+  toast('Rendering all graphs… please wait');
+
+  // 1. Force-render every page off-screen so Plotly can measure
+  const allPages = ['overview','honey','capacity','balloon','combined','field','tilegraphs','windows'];
+  for (const name of allPages) {{
+    const el = document.getElementById('page-' + name);
+    if (!el) continue;
+    el.style.cssText = 'display:block!important;visibility:hidden;position:absolute;top:0;left:0;width:900px';
+    renderPageSpecific(name);
+    await new Promise(r => setTimeout(r, name === 'windows' ? 600 : 300));
+  }}
+  if (selectedTiles.size) {{ renderTileGraphs(); await new Promise(r => setTimeout(r, 400)); }}
+
+  // 2. Convert every Plotly chart div to a static <img> (SVG)
+  const chartDivs = document.querySelectorAll('.chart-div[id]');
+  for (const div of chartDivs) {{
+    if (!div._fullLayout) continue;
+    try {{
+      const w   = Math.max(div.offsetWidth || 860, 400);
+      const h   = div._fullLayout.height || 300;
+      const svg = await Plotly.toImage(div, {{ format: 'svg', width: w, height: h }});
+      const img = document.createElement('img');
+      img.src = svg;
+      img.style.cssText = 'width:100%;display:block';
+      div.innerHTML = '';
+      div.appendChild(img);
+      div.removeAttribute('id');   // prevent double-processing
+    }} catch(e) {{ /* skip empty charts */ }}
+  }}
+
+  // 3. Restore page visibility, add snap class, remove scripts
+  allPages.forEach(name => {{
+    const el = document.getElementById('page-' + name);
+    if (el) el.style.cssText = '';
+  }});
+  document.body.classList.add('snap');
+
+  // Add window titles as visible headings (title inputs hidden in snap mode)
+  graphWindows.forEach(win => {{
+    const card = document.getElementById('win-' + win.id);
+    if (!card) return;
+    const existing = card.querySelector('.win-title');
+    if (!existing) {{
+      const h = document.createElement('div');
+      h.className = 'win-title';
+      h.textContent = win.title;
+      card.insertBefore(h, card.firstChild);
+    }}
+  }});
+
+  document.querySelectorAll('script').forEach(s => s.remove());
+
+  // 4. Download
+  const html  = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+  const blob  = new Blob([html], {{ type: 'text/html' }});
+  const url   = URL.createObjectURL(blob);
+  const a     = document.createElement('a');
+  const label = SESSIONS[activeSession]?.label || 'Session';
+  a.href     = url;
+  a.download = 'BSS_' + label.replace(/[^a-z0-9]/gi, '_') + '_snapshot.html';
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('Saved!');
+}}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RENDER ALL
+// ─────────────────────────────────────────────────────────────────────────────
+function renderAll() {{
+  renderOverview(activeLog());
+}}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INIT
+// ─────────────────────────────────────────────────────────────────────────────
+buildSessionTabs();
+renderAll();
+</script>
+</body>
+</html>"""
+
+    return html
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+def main():
+    parser = argparse.ArgumentParser(description="BSS Analytics Dashboard Generator")
+    parser.add_argument("--session", help='Session folder name e.g. "Session 3"')
+    parser.add_argument("--all",     action="store_true", help="Merge all sessions")
+    args = parser.parse_args()
+
+    sessions = find_sessions()
+    if not sessions:
+        print(f"No session folders found in {LOG_ROOT}/")
+        sys.exit(1)
+
+    print(f"Found {len(sessions)} session(s): {[s.name for s in sessions]}")
+
+    if args.all:
+        targets = sessions
+    elif args.session:
+        match = [s for s in sessions if s.name == args.session]
+        if not match:
+            print(f"Session '{args.session}' not found.")
+            sys.exit(1)
+        targets = match
+    else:
+        targets = [sessions[-1]]   # default: latest
+        print(f"Using latest: {targets[0].name}")
+
+    sessions_data = []
+    for path in targets:
+        print(f"  Loading {path.name}…")
+        combined, hour_logs = load_session(path)
+        print(f"    {len(hour_logs)} hour log(s), combined stats rows: {len(combined['stats'])}")
+        sessions_data.append({
+            "label":    path.name,
+            "combined": combined,
+            "hours":    hour_logs,
+        })
+
+    print(f"Generating HTML…")
+    html = build_html(sessions_data, [s["label"] for s in sessions_data])
+    OUTPUT.write_text(html, encoding="utf-8")
+    print(f"✅ Saved to {OUTPUT.resolve()}")
+    print(f"   Open it in your browser.")
+
+
+if __name__ == "__main__":
+    main()
