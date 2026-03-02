@@ -177,12 +177,14 @@ local hourRotateTime    = tick()
 local currentStatsFile  = ""
 local currentTilesFile  = ""
 
--- Capacity filter: while farming (not converting) ignore dips > 20%
--- of the last known valid value (off-field penalty). During converting
--- capacity legitimately drops and is always logged as-is.
+-- Capacity filter
+local lastValidCapacity  = 0   -- set properly on farming start; 0 triggers auto-init
+
 -- Tile state: no whitelist — track every tile seen
 local tileStates     = {}   -- assetId -> multiplier currently active
 local assetImageDone = {}   -- assetId -> true once image download queued
+
+-- Balloon logging
 local balloonPollenNow   = -1   -- current value this tick (-1 = not found)
 
 -- ── Folder helpers ──────────────────────────────────────────
@@ -379,7 +381,17 @@ end
 local function downloadAssetImage(id, name)
     local cleanName = sanitizeFileName(name)
     local path = ASSETS_DIR.."/"..cleanName.."_"..id..".png"
-    if isfile(path) then return true end
+
+    -- If file exists but is suspiciously small (≤879 bytes = Roblox placeholder),
+    -- delete it so we re-download properly
+    if isfile(path) then
+        local ok, existing = pcall(readfile, path)
+        if ok and existing and #existing <= 879 then
+            pcall(delfile, path)   -- delete the bad file
+        else
+            return true   -- file looks good, skip
+        end
+    end
 
     local thumbUrl = string.format(
         "https://thumbnails.roblox.com/v1/assets?assetIds=%s&size=420x420&format=Png&isCircular=false", id)
@@ -398,6 +410,9 @@ local function downloadAssetImage(id, name)
     local ok3, res3 = pcall(request, { Url=imgUrl, Method="GET" })
     if not ok3 or not res3 or res3.StatusCode ~= 200 then return false end
 
+    -- Sanity check: reject placeholder responses
+    if #res3.Body <= 879 then return false end
+
     writefile(path, res3.Body)
     return true
 end
@@ -413,6 +428,8 @@ local function processAssetQueue()
             if ok then
                 print("[BSS Assets] Saved: "..name.." ("..item.id..")")
             else
+                -- Clear the done flag so it retries when the tile appears again
+                assetImageDone[item.id] = nil
                 warn("[BSS Assets] Failed: "..item.id)
             end
             task.wait(0.5)
@@ -1257,16 +1274,17 @@ task.spawn(function()
         end
 
         -- ── Capacity filter ──────────────────────────────────────────
-        -- Converting  → always log raw (the dip is meaningful)
-        -- Booster/scan → off-field intentionally, freeze last valid value
-        -- Farming     → filter dips > 20% (off-field field-bonus loss)
-        local rawCap = LocalPlayer.CoreStats.Capacity.Value
+        local rawCap = LocalPlayer.CoreStats.Capacity.Value or 0
+        -- Guard: if lastValidCapacity somehow became nil, reset it now
+        if not lastValidCapacity or lastValidCapacity == 0 then
+            lastValidCapacity = rawCap
+        end
         local logCap
         if isConverting then
             logCap = rawCap
             lastValidCapacity = rawCap
         elseif activeBooster or isCheckingBoosters then
-            logCap = lastValidCapacity   -- freeze — off-field by design
+            logCap = lastValidCapacity
         else
             if rawCap >= lastValidCapacity * 0.80 then
                 lastValidCapacity = rawCap
