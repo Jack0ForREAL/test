@@ -233,71 +233,6 @@ local function flushCSV()
     end
 end
 
--- Asset image downloader — uses Roblox thumbnail API then fetches the CDN URL.
--- Mirrors the working BSS Asset Catcher script exactly.
--- Files saved as: BSSLogs/Assets/AssetName_ID.png
-local assetIdQueue      = {}
-local assetQueueRunning = false
-
-local function sanitizeFileName(name)
-    if not name then return "Unknown" end
-    return name:gsub('[%c%p%s]', "_")
-end
-
-local function downloadAssetImage(id, name)
-    local cleanName = sanitizeFileName(name)
-    local path = ASSETS_DIR.."/"..cleanName.."_"..id..".png"
-    if isfile(path) then return true end
-
-    -- Step 1: get the real CDN image URL from the thumbnail API
-    local thumbUrl = string.format(
-        "https://thumbnails.roblox.com/v1/assets?assetIds=%s&size=420x420&format=Png&isCircular=false", id)
-
-    local ok1, res1 = pcall(request, { Url=thumbUrl, Method="GET" })
-    if not ok1 or not res1 or res1.StatusCode ~= 200 then return false end
-
-    local ok2, decoded = pcall(function()
-        return HttpService:JSONDecode(res1.Body)
-    end)
-    if not ok2 or not decoded or not decoded.data or not decoded.data[1] then return false end
-
-    local imgUrl = decoded.data[1].imageUrl
-    if not imgUrl then return false end
-
-    -- Step 2: fetch the actual image bytes from the CDN
-    local ok3, res3 = pcall(request, { Url=imgUrl, Method="GET" })
-    if not ok3 or not res3 or res3.StatusCode ~= 200 then return false end
-
-    writefile(path, res3.Body)
-    return true
-end
-
-local function processAssetQueue()
-    if assetQueueRunning then return end
-    assetQueueRunning = true
-    task.spawn(function()
-        while #assetIdQueue > 0 do
-            local item = table.remove(assetIdQueue, 1)
-            local name = item.name or getAssetName(item.id)
-            local ok   = downloadAssetImage(item.id, name)
-            if ok then
-                print("[BSS Assets] Saved: "..name.." ("..item.id..")")
-            else
-                warn("[BSS Assets] Failed: "..item.id)
-            end
-            task.wait(0.5)
-        end
-        assetQueueRunning = false
-    end)
-end
-
-local function ensureAssetImage(assetId, assetName)
-    if assetImageDone[assetId] then return end
-    assetImageDone[assetId] = true
-    table.insert(assetIdQueue, { id=tostring(assetId), name=assetName })
-    processAssetQueue()
-end
-
 -- ============================================================
 -- 3. UTILITIES
 -- ============================================================
@@ -425,6 +360,70 @@ local function getAssetName(id)
     local n = ok and name or ("ID:"..tostring(id))
     assetNameCache[id] = n
     return n
+end
+
+-- ── Asset image downloader ───────────────────────────────────
+-- Uses Roblox thumbnail API → CDN URL → writefile.
+-- Mirrors the working BSS Asset Catcher script exactly.
+-- Files saved as: BSSLogs/Assets/AssetName_ID.png
+local assetIdQueue      = {}
+local assetQueueRunning = false
+
+local function sanitizeFileName(name)
+    if not name then return "Unknown" end
+    return name:gsub('[%c%p%s]', "_")
+end
+
+local function downloadAssetImage(id, name)
+    local cleanName = sanitizeFileName(name)
+    local path = ASSETS_DIR.."/"..cleanName.."_"..id..".png"
+    if isfile(path) then return true end
+
+    local thumbUrl = string.format(
+        "https://thumbnails.roblox.com/v1/assets?assetIds=%s&size=420x420&format=Png&isCircular=false", id)
+
+    local ok1, res1 = pcall(request, { Url=thumbUrl, Method="GET" })
+    if not ok1 or not res1 or res1.StatusCode ~= 200 then return false end
+
+    local ok2, decoded = pcall(function()
+        return HttpService:JSONDecode(res1.Body)
+    end)
+    if not ok2 or not decoded or not decoded.data or not decoded.data[1] then return false end
+
+    local imgUrl = decoded.data[1].imageUrl
+    if not imgUrl then return false end
+
+    local ok3, res3 = pcall(request, { Url=imgUrl, Method="GET" })
+    if not ok3 or not res3 or res3.StatusCode ~= 200 then return false end
+
+    writefile(path, res3.Body)
+    return true
+end
+
+local function processAssetQueue()
+    if assetQueueRunning then return end
+    assetQueueRunning = true
+    task.spawn(function()
+        while #assetIdQueue > 0 do
+            local item  = table.remove(assetIdQueue, 1)
+            local name  = item.name or getAssetName(item.id)
+            local ok    = downloadAssetImage(item.id, name)
+            if ok then
+                print("[BSS Assets] Saved: "..name.." ("..item.id..")")
+            else
+                warn("[BSS Assets] Failed: "..item.id)
+            end
+            task.wait(0.5)
+        end
+        assetQueueRunning = false
+    end)
+end
+
+local function ensureAssetImage(assetId, assetName)
+    if assetImageDone[assetId] then return end
+    assetImageDone[assetId] = true
+    table.insert(assetIdQueue, { id=tostring(assetId), name=assetName })
+    processAssetQueue()
 end
 
 local function fmtTime(secs)
