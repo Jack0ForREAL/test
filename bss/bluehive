@@ -180,9 +180,8 @@ local currentTilesFile  = ""
 -- capacity legitimately drops and is always logged as-is.
 local lastValidCapacity = LocalPlayer.CoreStats.Capacity.Value
 
--- Tile state: no whitelist — track every tile seen
-local tileStates    = {}   -- assetId -> multiplier string currently active
-local assetImageDone= {}   -- assetId -> true once thumbnail saved
+-- Balloon logging
+local balloonPollenNow   = -1   -- current value this tick (-1 = not found)
 
 -- ── Folder helpers ──────────────────────────────────────────
 local function ensureDir(path)
@@ -212,7 +211,7 @@ local function openNewFiles()
     currentTilesFile = makeLogFilename("tiles")
     if not isfile(currentStatsFile) then
         writefile(currentStatsFile,
-            "Timestamp,TotalHoney,HPS,Pollen,PPS,Capacity,Field,Converting\n")
+            "Timestamp,TotalHoney,HPS,Pollen,PPS,Capacity,Field,Converting,BalloonPollen\n")
     end
     if not isfile(currentTilesFile) then
         writefile(currentTilesFile,
@@ -232,28 +231,102 @@ local function flushCSV()
     end
 end
 
--- Download and save the asset thumbnail image once per unique ID
+-- Scan PlayerGui + StarterGui for an ImageLabel/Button/Decal/Mesh whose
+-- image ID matches assetId, then fetch the raw rbxassetid:// URL.
+-- Saves as BSSLogs/Assets/AssetName.png.  Runs in background thread.
 local function ensureAssetImage(assetId, assetName)
     if assetImageDone[assetId] then return end
     assetImageDone[assetId] = true
     task.spawn(function()
         local safeName = assetName:gsub('[\\/:*?"<>|]', "_")
-        local path = ASSETS_DIR.."/"..safeName..".png"
+        local path     = ASSETS_DIR.."/"..safeName..".png"
         if isfile(path) then return end
+
+        local StarterGui  = game:GetService("StarterGui")
+        local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
+        local targetId    = tostring(assetId)
+        local foundUrl    = nil
+
+        local function extractId(imageStr)
+            if not imageStr or imageStr == "" then return nil end
+            return imageStr:match("rbxassetid://(%d+)")
+                or imageStr:match("^(%d+)$")
+        end
+
+        local function checkObj(obj)
+            if foundUrl then return end
+            local url, id
+            if obj:IsA("ImageLabel") or obj:IsA("ImageButton") then
+                url = obj.Image
+                id  = extractId(url)
+                if id == targetId then foundUrl = url; return end
+                if obj:IsA("ImageButton") then
+                    url = obj.HoverImage;   id = extractId(url)
+                    if id == targetId then foundUrl = url; return end
+                    url = obj.PressedImage; id = extractId(url)
+                    if id == targetId then foundUrl = url; return end
+                end
+            elseif obj:IsA("Decal") or obj:IsA("Texture") then
+                url = obj.Texture; id = extractId(url)
+                if id == targetId then foundUrl = url; return end
+            elseif obj:IsA("SpecialMesh") then
+                url = obj.TextureId; id = extractId(url)
+                if id == targetId then foundUrl = url; return end
+            end
+        end
+
+        local function scanRoot(root)
+            checkObj(root)
+            for _, obj in ipairs(root:GetDescendants()) do
+                checkObj(obj)
+                if foundUrl then return end
+            end
+        end
+
+        scanRoot(PlayerGui)
+        if not foundUrl then scanRoot(StarterGui) end
+
+        -- Fallback: construct the rbxassetid URL directly if not found in GUI
+        if not foundUrl then
+            foundUrl = "rbxassetid://"..targetId
+        end
+
         local ok, data = pcall(function()
-            return game:HttpGet(
-                "https://www.roblox.com/asset-thumbnail/image?assetId="
-                ..assetId.."&width=420&height=420&format=png", true)
+            return game:HttpGet(foundUrl, true)
         end)
-        if ok and data and #data > 0 then
+        if ok and data and #data > 100 then
             writefile(path, data)
         end
     end)
 end
 
--- UI references (populated by createUI)
-local UI = {}
-local boosterLabels = {}
+-- Read pollen stored in the nearest BalloonBody to the hive teleport position.
+-- Returns the integer value, or -1 if no balloon found within radius.
+local BALLOON_SEARCH_RADIUS = 30
+local function readNearestBalloon()
+    local hPos = getHivePos()   -- this IS the teleport position (Display.Position - offset)
+    if not hPos then return -1 end
+
+    local best, bestDist = nil, BALLOON_SEARCH_RADIUS
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj.Name == "BalloonBody" and obj:IsA("BasePart") then
+            local d = (obj.Position - hPos).Magnitude
+            if d < bestDist then
+                bestDist = d
+                best = obj
+            end
+        end
+    end
+    if not best then return -1 end
+
+    local ok, val = pcall(function()
+        return best.GuiAttach.Gui.Bar.TextLabel.Text
+    end)
+    if not ok or not val then return -1 end
+
+    local num = tonumber(val:gsub("[,%s]", ""))
+    return num or -1
+end
 
 -- ============================================================
 -- 3. UTILITIES
@@ -589,6 +662,8 @@ local function createUI()
 
             -- Equip Diamond Mask immediately when farming starts
             RepStorage.Events.ItemPackageEvent:InvokeServer("Equip",{["Category"]="Accessory",["Type"]="Diamond Mask"})
+
+            balloonPollenNow  = -1
 
             -- New session every time farming starts
             flushCSV()
@@ -1194,6 +1269,9 @@ task.spawn(function()
             end
         end
 
+        -- ── Balloon pollen reading ───────────────────────────────────
+        balloonPollenNow = readNearestBalloon()
+
         -- ── Only write to CSV while actively farming ────────────────
         if isFarming then
             -- ── Hourly file rotation ──────────────────────────────────
@@ -1205,10 +1283,11 @@ task.spawn(function()
 
             -- ── Write stats row ───────────────────────────────────────
             -- Columns: Timestamp, TotalHoney, HPS, Pollen, PPS,
-            --          Capacity, Field, Converting
-            local cP = LocalPlayer.CoreStats.Pollen.Value
+            --          Capacity, Field, Converting, BalloonPollen
+            local cP    = LocalPlayer.CoreStats.Pollen.Value
+            local bpStr = balloonPollenNow >= 0 and tostring(balloonPollenNow) or ""
             table.insert(statsBuffer, string.format(
-                "%s,%d,%d,%d,%d,%d,%s,%s",
+                "%s,%d,%d,%d,%d,%d,%s,%s,%s",
                 os.date("%Y-%m-%d %H:%M:%S"),
                 LocalPlayer.CoreStats.Honey.Value,
                 math.floor(hps),
@@ -1216,7 +1295,8 @@ task.spawn(function()
                 math.floor(pps),
                 logCap,
                 currentField,
-                tostring(isConverting)
+                tostring(isConverting),
+                bpStr
             ))
 
             if now - lastSaveTime >= SAVE_INTERVAL then
