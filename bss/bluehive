@@ -1,7 +1,9 @@
 -- ============================================================
 -- BSS MASTER V23 — Full rewrite, all bugs fixed
 -- ============================================================
-if _G.Running then return end
+-- Stop any previous running instance cleanly before starting fresh
+_G.Running = false
+task.wait(0.1)
 _G.Running = true
 
 -- [[ SERVICES ]]
@@ -231,101 +233,69 @@ local function flushCSV()
     end
 end
 
--- Scan PlayerGui + StarterGui for an ImageLabel/Button/Decal/Mesh whose
--- image ID matches assetId, then fetch the raw rbxassetid:// URL.
--- Saves as BSSLogs/Assets/AssetName.png.  Runs in background thread.
-local function ensureAssetImage(assetId, assetName)
-    if assetImageDone[assetId] then return end
-    assetImageDone[assetId] = true
+-- Asset image downloader — uses Roblox thumbnail API then fetches the CDN URL.
+-- Mirrors the working BSS Asset Catcher script exactly.
+-- Files saved as: BSSLogs/Assets/AssetName_ID.png
+local assetIdQueue      = {}
+local assetQueueRunning = false
+
+local function sanitizeFileName(name)
+    if not name then return "Unknown" end
+    return name:gsub('[%c%p%s]', "_")
+end
+
+local function downloadAssetImage(id, name)
+    local cleanName = sanitizeFileName(name)
+    local path = ASSETS_DIR.."/"..cleanName.."_"..id..".png"
+    if isfile(path) then return true end
+
+    -- Step 1: get the real CDN image URL from the thumbnail API
+    local thumbUrl = string.format(
+        "https://thumbnails.roblox.com/v1/assets?assetIds=%s&size=420x420&format=Png&isCircular=false", id)
+
+    local ok1, res1 = pcall(request, { Url=thumbUrl, Method="GET" })
+    if not ok1 or not res1 or res1.StatusCode ~= 200 then return false end
+
+    local ok2, decoded = pcall(function()
+        return HttpService:JSONDecode(res1.Body)
+    end)
+    if not ok2 or not decoded or not decoded.data or not decoded.data[1] then return false end
+
+    local imgUrl = decoded.data[1].imageUrl
+    if not imgUrl then return false end
+
+    -- Step 2: fetch the actual image bytes from the CDN
+    local ok3, res3 = pcall(request, { Url=imgUrl, Method="GET" })
+    if not ok3 or not res3 or res3.StatusCode ~= 200 then return false end
+
+    writefile(path, res3.Body)
+    return true
+end
+
+local function processAssetQueue()
+    if assetQueueRunning then return end
+    assetQueueRunning = true
     task.spawn(function()
-        local safeName = assetName:gsub('[\\/:*?"<>|]', "_")
-        local path     = ASSETS_DIR.."/"..safeName..".png"
-        if isfile(path) then return end
-
-        local StarterGui  = game:GetService("StarterGui")
-        local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
-        local targetId    = tostring(assetId)
-        local foundUrl    = nil
-
-        local function extractId(imageStr)
-            if not imageStr or imageStr == "" then return nil end
-            return imageStr:match("rbxassetid://(%d+)")
-                or imageStr:match("^(%d+)$")
-        end
-
-        local function checkObj(obj)
-            if foundUrl then return end
-            local url, id
-            if obj:IsA("ImageLabel") or obj:IsA("ImageButton") then
-                url = obj.Image
-                id  = extractId(url)
-                if id == targetId then foundUrl = url; return end
-                if obj:IsA("ImageButton") then
-                    url = obj.HoverImage;   id = extractId(url)
-                    if id == targetId then foundUrl = url; return end
-                    url = obj.PressedImage; id = extractId(url)
-                    if id == targetId then foundUrl = url; return end
-                end
-            elseif obj:IsA("Decal") or obj:IsA("Texture") then
-                url = obj.Texture; id = extractId(url)
-                if id == targetId then foundUrl = url; return end
-            elseif obj:IsA("SpecialMesh") then
-                url = obj.TextureId; id = extractId(url)
-                if id == targetId then foundUrl = url; return end
+        while #assetIdQueue > 0 do
+            local item = table.remove(assetIdQueue, 1)
+            local name = item.name or getAssetName(item.id)
+            local ok   = downloadAssetImage(item.id, name)
+            if ok then
+                print("[BSS Assets] Saved: "..name.." ("..item.id..")")
+            else
+                warn("[BSS Assets] Failed: "..item.id)
             end
+            task.wait(0.5)
         end
-
-        local function scanRoot(root)
-            checkObj(root)
-            for _, obj in ipairs(root:GetDescendants()) do
-                checkObj(obj)
-                if foundUrl then return end
-            end
-        end
-
-        scanRoot(PlayerGui)
-        if not foundUrl then scanRoot(StarterGui) end
-
-        -- Fallback: construct the rbxassetid URL directly if not found in GUI
-        if not foundUrl then
-            foundUrl = "rbxassetid://"..targetId
-        end
-
-        local ok, data = pcall(function()
-            return game:HttpGet(foundUrl, true)
-        end)
-        if ok and data and #data > 100 then
-            writefile(path, data)
-        end
+        assetQueueRunning = false
     end)
 end
 
--- Read pollen stored in the nearest BalloonBody to the hive teleport position.
--- Returns the integer value, or -1 if no balloon found within radius.
-local BALLOON_SEARCH_RADIUS = 30
-local function readNearestBalloon()
-    local hPos = getHivePos()   -- this IS the teleport position (Display.Position - offset)
-    if not hPos then return -1 end
-
-    local best, bestDist = nil, BALLOON_SEARCH_RADIUS
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj.Name == "BalloonBody" and obj:IsA("BasePart") then
-            local d = (obj.Position - hPos).Magnitude
-            if d < bestDist then
-                bestDist = d
-                best = obj
-            end
-        end
-    end
-    if not best then return -1 end
-
-    local ok, val = pcall(function()
-        return best.GuiAttach.Gui.Bar.TextLabel.Text
-    end)
-    if not ok or not val then return -1 end
-
-    local num = tonumber(val:gsub("[,%s]", ""))
-    return num or -1
+local function ensureAssetImage(assetId, assetName)
+    if assetImageDone[assetId] then return end
+    assetImageDone[assetId] = true
+    table.insert(assetIdQueue, { id=tostring(assetId), name=assetName })
+    processAssetQueue()
 end
 
 -- ============================================================
@@ -407,6 +377,36 @@ local function getHivePos()
         end
     end
     return nil
+end
+
+-- Read pollen stored in the nearest BalloonBody to the hive teleport position.
+-- Returns integer value, or -1 if no balloon within radius or any error occurs.
+local BALLOON_SEARCH_RADIUS = 30
+local function readNearestBalloon()
+    local ok0, hPos = pcall(getHivePos)
+    if not ok0 or not hPos then return -1 end
+
+    local best, bestDist = nil, BALLOON_SEARCH_RADIUS
+    local okD, desc = pcall(function() return workspace:GetDescendants() end)
+    if not okD or not desc then return -1 end
+
+    for _, obj in ipairs(desc) do
+        if obj and obj.Parent and obj.Name == "BalloonBody" and obj:IsA("BasePart") then
+            local okP, d = pcall(function() return (obj.Position - hPos).Magnitude end)
+            if okP and d and d < bestDist then
+                bestDist = d
+                best = obj
+            end
+        end
+    end
+    if not best or not best.Parent then return -1 end
+
+    local okT, val = pcall(function()
+        return best.GuiAttach.Gui.Bar.TextLabel.Text
+    end)
+    if not okT or not val or val == "" then return -1 end
+
+    return tonumber(val:gsub("[,%s]", "")) or -1
 end
 
 local function parseCooldown(txt)
