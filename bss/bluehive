@@ -331,6 +331,11 @@ end
 -- ============================================================
 -- 3. UTILITIES
 -- ============================================================
+-- UI references (populated by createUI — declared here as upvalues
+-- so booster dispatch and stats loop can reference them before createUI runs)
+local UI            = {}
+local boosterLabels = {}
+
 local function fmt(n)
     return tostring(math.floor(n)):reverse():gsub("%d%d%d","%1,"):reverse():gsub("^,","")
 end
