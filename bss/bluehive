@@ -166,6 +166,11 @@ local showInterval       = false
 local totalMMRewards     = {}
 local assetNameCache     = {}
 
+-- Rolling current-rate window (10s)
+local RATE_WINDOW        = 10
+local rateHoneyHistory   = {}   -- {tick, honey} pairs
+local ratePollenHistory  = {}   -- {tick, pollen} pairs
+
 -- ── Logging / CSV ──────────────────────────────────────────
 local SAVE_INTERVAL     = 15
 local LOG_ROOT          = "BSSLogs"
@@ -215,7 +220,7 @@ local function openNewFiles()
     currentTilesFile = makeLogFilename("tiles")
     if not isfile(currentStatsFile) then
         writefile(currentStatsFile,
-            "Timestamp,TotalHoney,HPS,Pollen,PPS,Capacity,Field,Converting,BalloonPollen\n")
+            "Timestamp,TotalHoney,HPS,CurrentHPS,Pollen,PPS,CurrentPPS,Capacity,Field,Converting,BalloonPollen\n")
     end
     if not isfile(currentTilesFile) then
         writefile(currentTilesFile,
@@ -687,6 +692,8 @@ local function createUI()
             RepStorage.Events.ItemPackageEvent:InvokeServer("Equip",{["Category"]="Accessory",["Type"]="Diamond Mask"})
 
             balloonPollenNow  = -1
+            rateHoneyHistory  = {}
+            ratePollenHistory = {}
 
             -- New session every time farming starts
             -- Open files FIRST so flushCSV has valid paths
@@ -1294,8 +1301,24 @@ task.spawn(function()
             end
         end
 
-        -- ── Balloon pollen reading ───────────────────────────────────
-        balloonPollenNow = readNearestBalloon()
+        -- ── Rolling current rates (10s window) ──────────────────────
+        local nowHoney  = LocalPlayer.CoreStats.Honey.Value
+        local nowPollen = LocalPlayer.CoreStats.Pollen.Value + totalPollen  -- total pollen seen
+        table.insert(rateHoneyHistory,  {t=now, v=nowHoney})
+        table.insert(ratePollenHistory, {t=now, v=nowPollen})
+        -- Trim entries older than RATE_WINDOW
+        while #rateHoneyHistory  > 1 and now - rateHoneyHistory[1].t  > RATE_WINDOW do table.remove(rateHoneyHistory,  1) end
+        while #ratePollenHistory > 1 and now - ratePollenHistory[1].t > RATE_WINDOW do table.remove(ratePollenHistory, 1) end
+        -- Compute current rate from oldest entry in window
+        local currentHPS, currentPPS = hps, pps  -- fallback to session avg
+        if #rateHoneyHistory >= 2 then
+            local dt = rateHoneyHistory[#rateHoneyHistory].t - rateHoneyHistory[1].t
+            if dt > 0 then currentHPS = (rateHoneyHistory[#rateHoneyHistory].v - rateHoneyHistory[1].v) / dt end
+        end
+        if #ratePollenHistory >= 2 then
+            local dt = ratePollenHistory[#ratePollenHistory].t - ratePollenHistory[1].t
+            if dt > 0 then currentPPS = (ratePollenHistory[#ratePollenHistory].v - ratePollenHistory[1].v) / dt end
+        end
 
         -- ── Only write to CSV while actively farming ────────────────
         if isFarming then
@@ -1303,21 +1326,24 @@ task.spawn(function()
             if now - hourRotateTime >= 3600 then
                 flushCSV()
                 openNewFiles()
+                tileStates    = {}   -- clear so all tiles re-log in the new file
                 hourRotateTime = now
             end
 
             -- ── Write stats row ───────────────────────────────────────
-            -- Columns: Timestamp, TotalHoney, HPS, Pollen, PPS,
+            -- Columns: Timestamp, TotalHoney, HPS, CurrentHPS, Pollen, PPS, CurrentPPS,
             --          Capacity, Field, Converting, BalloonPollen
             local cP    = LocalPlayer.CoreStats.Pollen.Value
             local bpStr = balloonPollenNow >= 0 and tostring(balloonPollenNow) or ""
             table.insert(statsBuffer, string.format(
-                "%s,%d,%d,%d,%d,%d,\"%s\",%s,%s",
+                "%s,%d,%d,%d,%d,%d,%d,%d,\"%s\",%s,%s",
                 os.date("%Y-%m-%d %H:%M:%S"),
                 LocalPlayer.CoreStats.Honey.Value,
                 math.floor(hps),
+                math.floor(math.max(0, currentHPS)),
                 cP,
                 math.floor(pps),
+                math.floor(math.max(0, currentPPS)),
                 logCap,
                 currentField,
                 tostring(isConverting),
