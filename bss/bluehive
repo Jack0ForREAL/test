@@ -180,9 +180,9 @@ local currentTilesFile  = ""
 -- Capacity filter: while farming (not converting) ignore dips > 20%
 -- of the last known valid value (off-field penalty). During converting
 -- capacity legitimately drops and is always logged as-is.
-local lastValidCapacity = LocalPlayer.CoreStats.Capacity.Value
-
--- Balloon logging
+-- Tile state: no whitelist — track every tile seen
+local tileStates     = {}   -- assetId -> multiplier currently active
+local assetImageDone = {}   -- assetId -> true once image download queued
 local balloonPollenNow   = -1   -- current value this tick (-1 = not found)
 
 -- ── Folder helpers ──────────────────────────────────────────
@@ -223,10 +223,12 @@ end
 -- openNewFiles() is called inside the start button handler instead
 
 local function flushCSV()
+    if currentStatsFile == "" then return end   -- files not opened yet
     if #statsBuffer > 0 then
         appendfile(currentStatsFile, table.concat(statsBuffer, "\n").."\n")
         statsBuffer = {}
     end
+    if currentTilesFile == "" then return end
     if #tilesBuffer > 0 then
         appendfile(currentTilesFile, table.concat(tilesBuffer, "\n").."\n")
         tilesBuffer = {}
@@ -670,10 +672,11 @@ local function createUI()
             balloonPollenNow  = -1
 
             -- New session every time farming starts
-            flushCSV()
+            -- Open files FIRST so flushCSV has valid paths
             statsBuffer       = {}
             tilesBuffer       = {}
             tileStates        = {}
+            assetImageDone    = {}
             sessionFolder     = nextSessionFolder()
             hourRotateTime    = tick()
             lastSaveTime      = tick()
@@ -1291,7 +1294,7 @@ task.spawn(function()
             local cP    = LocalPlayer.CoreStats.Pollen.Value
             local bpStr = balloonPollenNow >= 0 and tostring(balloonPollenNow) or ""
             table.insert(statsBuffer, string.format(
-                "%s,%d,%d,%d,%d,%d,%s,%s,%s",
+                "%s,%d,%d,%d,%d,%d,\"%s\",%s,%s",
                 os.date("%Y-%m-%d %H:%M:%S"),
                 LocalPlayer.CoreStats.Honey.Value,
                 math.floor(hps),
