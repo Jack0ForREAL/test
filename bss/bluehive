@@ -164,24 +164,92 @@ local showInterval       = false
 local totalMMRewards     = {}
 local assetNameCache     = {}
 
--- CSV
-local statsBuffer, tilesBuffer = {}, {}
-local lastSaveTime  = tick()
-local SAVE_INTERVAL = 15
-local function makeFilename(base)
-    local d = os.date("*t")
-    return string.format("%s-%d-%d-%d_%d%s.csv", base, d.year, d.month, d.day, d.hour, d.hour<12 and "am" or "pm")
+-- ── Logging / CSV ──────────────────────────────────────────
+local SAVE_INTERVAL     = 15
+local LOG_ROOT          = "BSSLogs"
+local ASSETS_DIR        = LOG_ROOT.."/Assets"
+local statsBuffer       = {}
+local tilesBuffer       = {}
+local lastSaveTime      = tick()
+local hourRotateTime    = tick()
+local currentStatsFile  = ""
+local currentTilesFile  = ""
+
+-- Capacity filter: while farming (not converting) ignore dips > 20%
+-- of the last known valid value (off-field penalty). During converting
+-- capacity legitimately drops and is always logged as-is.
+local lastValidCapacity = LocalPlayer.CoreStats.Capacity.Value
+
+-- Tile state: no whitelist — track every tile seen
+local tileStates    = {}   -- assetId -> multiplier string currently active
+local assetImageDone= {}   -- assetId -> true once thumbnail saved
+
+-- ── Folder helpers ──────────────────────────────────────────
+local function ensureDir(path)
+    if not isfolder(path) then makefolder(path) end
 end
-local statsFile     = makeFilename("TelementBSS")
-local tilesFile     = makeFilename("TelementBSSTiles")
-local tilesFilename = "Tiles.txt"
-local monitoredTiles = (function()
-    if not isfile(tilesFilename) then return {} end
-    local ids = {}
-    for line in readfile(tilesFilename):gmatch("%S+") do ids[line] = true end
-    return ids
-end)()
-local tileStates = {}
+
+local function nextSessionFolder()
+    ensureDir(LOG_ROOT)
+    ensureDir(ASSETS_DIR)
+    local n = 1
+    while isfolder(LOG_ROOT.."/Session "..n) do n = n + 1 end
+    local path = LOG_ROOT.."/Session "..n
+    makefolder(path)
+    return path
+end
+
+local sessionFolder = ""   -- set fresh each time farming starts
+
+local function makeLogFilename(tag)
+    local d = os.date("*t")
+    return string.format("%s/%s_%04d-%02d-%02d_%02dh.csv",
+        sessionFolder, tag, d.year, d.month, d.day, d.hour)
+end
+
+local function openNewFiles()
+    currentStatsFile = makeLogFilename("stats")
+    currentTilesFile = makeLogFilename("tiles")
+    if not isfile(currentStatsFile) then
+        writefile(currentStatsFile,
+            "Timestamp,TotalHoney,HPS,Pollen,PPS,Capacity,Field,Converting\n")
+    end
+    if not isfile(currentTilesFile) then
+        writefile(currentTilesFile,
+            "Timestamp,AssetID,AssetName,Multiplier,State\n")
+    end
+end
+-- openNewFiles() is called inside the start button handler instead
+
+local function flushCSV()
+    if #statsBuffer > 0 then
+        appendfile(currentStatsFile, table.concat(statsBuffer, "\n").."\n")
+        statsBuffer = {}
+    end
+    if #tilesBuffer > 0 then
+        appendfile(currentTilesFile, table.concat(tilesBuffer, "\n").."\n")
+        tilesBuffer = {}
+    end
+end
+
+-- Download and save the asset thumbnail image once per unique ID
+local function ensureAssetImage(assetId, assetName)
+    if assetImageDone[assetId] then return end
+    assetImageDone[assetId] = true
+    task.spawn(function()
+        local safeName = assetName:gsub('[\\/:*?"<>|]', "_")
+        local path = ASSETS_DIR.."/"..safeName..".png"
+        if isfile(path) then return end
+        local ok, data = pcall(function()
+            return game:HttpGet(
+                "https://www.roblox.com/asset-thumbnail/image?assetId="
+                ..assetId.."&width=420&height=420&format=png", true)
+        end)
+        if ok and data and #data > 0 then
+            writefile(path, data)
+        end
+    end)
+end
 
 -- UI references (populated by createUI)
 local UI = {}
@@ -295,18 +363,6 @@ local function sendWebhook(body)
     end)
 end
 
-local function flushCSV()
-    if #statsBuffer > 0 then
-        local data = table.concat(statsBuffer,"\n")
-        if isfile(statsFile) then appendfile(statsFile,"\n"..data) else writefile(statsFile,"Time,TotalHoney,HPS,Pollen,PPS,Capacity\n"..data) end
-        statsBuffer = {}
-    end
-    if #tilesBuffer > 0 then
-        local data = table.concat(tilesBuffer,"\n")
-        if isfile(tilesFile) then appendfile(tilesFile,"\n"..data) else writefile(tilesFile,"Time,TileID,Multiplier,State\n"..data) end
-        tilesBuffer = {}
-    end
-end
 
 -- ============================================================
 -- 4. UI
@@ -530,6 +586,20 @@ local function createUI()
             startBtn.Text="■  STOP FARMING"; startBtn.BackgroundColor3=Color3.fromRGB(160,40,40)
             statusLbl.Text="  Status: Farming"
             intervalStart=tick(); intervalHoney=LocalPlayer.CoreStats.Honey.Value
+
+            -- Equip Diamond Mask immediately when farming starts
+            RepStorage.Events.ItemPackageEvent:InvokeServer("Equip",{["Category"]="Accessory",["Type"]="Diamond Mask"})
+
+            -- New session every time farming starts
+            flushCSV()
+            statsBuffer       = {}
+            tilesBuffer       = {}
+            tileStates        = {}
+            sessionFolder     = nextSessionFolder()
+            hourRotateTime    = tick()
+            lastSaveTime      = tick()
+            lastValidCapacity = LocalPlayer.CoreStats.Capacity.Value
+            openNewFiles()
             if not isCheckingBoosters and not boosterScanDone then
                 isCheckingBoosters = true
                 task.spawn(function()
@@ -591,6 +661,7 @@ local function createUI()
             startBtn.Text="▶  START FARMING"; startBtn.BackgroundColor3=Color3.fromRGB(30,140,60)
             statusLbl.Text="  Status: Idle"
             unanchor()
+            flushCSV()   -- save anything buffered before session ends
         end
     end)
 
@@ -1073,14 +1144,15 @@ end)
 task.spawn(function()
     while _G.Running do
         task.wait(1)
-        local elapsed = math.max(1, tick()-sessionStart)
+        local now     = tick()
+        local elapsed = math.max(1, now - sessionStart)
         local honey   = LocalPlayer.CoreStats.Honey.Value - sessionHoney
-        local hps     = honey/elapsed
-        local pps     = totalPollen/elapsed
+        local hps     = honey / elapsed
+        local pps     = totalPollen / elapsed
 
         local dHPS = hps
         if showInterval then
-            local ie = math.max(1, tick()-intervalStart)
+            local ie = math.max(1, now - intervalStart)
             dHPS = (LocalPlayer.CoreStats.Honey.Value - intervalHoney) / ie
         end
 
@@ -1092,21 +1164,70 @@ task.spawn(function()
             UI.pM.Text    = "  P/m:  "..fmt(pps*60)
             UI.pH.Text    = "  P/h:  "..fmt(pps*3600)
             UI.total.Text = "  Total Honey:  "..fmt(honey)
-            UI.time.Text  = "  Runtime:  "..os.date("!%X",elapsed)
-            if UI.fieldLbl then UI.fieldLbl.Text="  Field: "..currentField end
+            UI.time.Text  = "  Runtime:  "..os.date("!%X", elapsed)
+            if UI.fieldLbl then UI.fieldLbl.Text = "  Field: "..currentField end
 
-            local lines={}
+            local lines = {}
             for id,cnt in pairs(totalMMRewards) do
-                table.insert(lines,"  "..getAssetName(id)..": x"..cnt)
+                table.insert(lines, "  "..getAssetName(id)..": x"..cnt)
             end
-            UI.mm.Text = #lines>0 and table.concat(lines,"\n") or "  No rewards yet."
+            UI.mm.Text = #lines > 0 and table.concat(lines, "\n") or "  No rewards yet."
         end
 
-        local cP,cC = LocalPlayer.CoreStats.Pollen.Value, LocalPlayer.CoreStats.Capacity.Value
-        table.insert(statsBuffer, string.format("%s,%d,%d,%d,%d,%d", os.date("%H:%M:%S"), LocalPlayer.CoreStats.Honey.Value, math.floor(hps), cP, math.floor(pps), cC))
-        if tick()-lastSaveTime >= SAVE_INTERVAL then flushCSV(); lastSaveTime=tick() end
+        -- ── Capacity filter ──────────────────────────────────────────
+        -- Converting  → always log raw (the dip is meaningful)
+        -- Booster/scan → off-field intentionally, freeze last valid value
+        -- Farming     → filter dips > 20% (off-field field-bonus loss)
+        local rawCap = LocalPlayer.CoreStats.Capacity.Value
+        local logCap
+        if isConverting then
+            logCap = rawCap
+            lastValidCapacity = rawCap
+        elseif activeBooster or isCheckingBoosters then
+            logCap = lastValidCapacity   -- freeze — off-field by design
+        else
+            if rawCap >= lastValidCapacity * 0.80 then
+                lastValidCapacity = rawCap
+                logCap = rawCap
+            else
+                logCap = lastValidCapacity
+            end
+        end
 
-        if ignoreBalloonUntil>0 and tick()>ignoreBalloonUntil then ignoreBalloonUntil=0 end
+        -- ── Only write to CSV while actively farming ────────────────
+        if isFarming then
+            -- ── Hourly file rotation ──────────────────────────────────
+            if now - hourRotateTime >= 3600 then
+                flushCSV()
+                openNewFiles()
+                hourRotateTime = now
+            end
+
+            -- ── Write stats row ───────────────────────────────────────
+            -- Columns: Timestamp, TotalHoney, HPS, Pollen, PPS,
+            --          Capacity, Field, Converting
+            local cP = LocalPlayer.CoreStats.Pollen.Value
+            table.insert(statsBuffer, string.format(
+                "%s,%d,%d,%d,%d,%d,%s,%s",
+                os.date("%Y-%m-%d %H:%M:%S"),
+                LocalPlayer.CoreStats.Honey.Value,
+                math.floor(hps),
+                cP,
+                math.floor(pps),
+                logCap,
+                currentField,
+                tostring(isConverting)
+            ))
+
+            if now - lastSaveTime >= SAVE_INTERVAL then
+                flushCSV()
+                lastSaveTime = now
+            end
+        end
+
+        if ignoreBalloonUntil > 0 and now > ignoreBalloonUntil then
+            ignoreBalloonUntil = 0
+        end
     end
 end)
 
@@ -1530,33 +1651,74 @@ task.spawn(function()
 end)
 
 -- ============================================================
--- 16. TILE MONITOR
+-- 16. TILE MONITOR (full overhaul)
+-- Scans ALL tiles every 0.25s — no whitelist needed.
+-- Logs every tile that appears or changes multiplier.
+-- Downloads the asset thumbnail image on first sight.
+-- CSV columns: Timestamp, AssetID, AssetName, Multiplier, State
+-- Multiplier is stored as plain integer (e.g. 3 not x3) for easy
+-- graphing — State is "Active" or "Removed".
 -- ============================================================
 task.spawn(function()
     while _G.Running do
         task.wait(0.25)
-        local grid = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui") and LocalPlayer.PlayerGui.ScreenGui:FindFirstChild("TileGrid")
-        if grid then
-            local cur={}
-            for _,tile in ipairs(grid:GetChildren()) do
-                if tile.Name=="IconTile" and tile:FindFirstChild("BG") and tile.BG:FindFirstChild("Icon") then
-                    local id=tile.BG.Icon.Image:match("%d+")
-                    if monitoredTiles[id] then
-                        local tid="T"..id
-                        local mult=(tile.BG:FindFirstChild("Text") and tile.BG.Text.ContentText~="" and tile.BG.Text.ContentText) or "x1"
-                        cur[tid]=true
-                        if tileStates[tid]~=mult then
-                            tileStates[tid]=mult
-                            table.insert(tilesBuffer,string.format("%s,%s,%s,Active",os.date("%H:%M:%S"),tid,mult))
-                        end
-                    end
-                end
+        local sg2  = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui")
+        local grid = sg2 and sg2:FindFirstChild("TileGrid")
+        if not grid then continue end
+        if not isFarming then continue end   -- don't log tiles while idle
+
+        local nowStr = os.date("%Y-%m-%d %H:%M:%S")
+        local seen   = {}   -- assetId -> true this tick
+
+        for _,tile in ipairs(grid:GetChildren()) do
+            if tile.Name ~= "IconTile" then continue end
+            local bg = tile:FindFirstChild("BG")
+            if not bg then continue end
+            local iconLbl = bg:FindFirstChild("Icon")
+            if not iconLbl then continue end
+
+            local rawImg = iconLbl.Image or ""
+            local assetId = rawImg:match("%d+")
+            if not assetId then continue end
+
+            -- Parse multiplier — strip the 'x', default 1
+            local multRaw = (bg:FindFirstChild("Text") and bg.Text.ContentText ~= ""
+                            and bg.Text.ContentText) or "x1"
+            local multNum = tonumber(multRaw:match("%d+")) or 1
+
+            seen[assetId] = true
+
+            local prev = tileStates[assetId]
+            if not prev or prev ~= multNum then
+                -- New tile or multiplier changed
+                tileStates[assetId] = multNum
+
+                -- Resolve asset name (cached)
+                local name = getAssetName(assetId)
+
+                -- Download thumbnail once
+                ensureAssetImage(assetId, name)
+
+                -- Escape name for CSV (wrap in quotes, escape internal quotes)
+                local safeName = '"'..name:gsub('"', '""')..'"'
+
+                table.insert(tilesBuffer, string.format(
+                    "%s,%s,%s,%d,Active",
+                    nowStr, assetId, safeName, multNum
+                ))
             end
-            for tid in pairs(tileStates) do
-                if not cur[tid] then
-                    tileStates[tid]=nil
-                    table.insert(tilesBuffer,string.format("%s,%s,x0,Removed",os.date("%H:%M:%S"),tid))
-                end
+        end
+
+        -- Log removals for tiles that disappeared this tick
+        for assetId in pairs(tileStates) do
+            if not seen[assetId] then
+                local name     = getAssetName(assetId)
+                local safeName = '"'..name:gsub('"', '""')..'"'
+                table.insert(tilesBuffer, string.format(
+                    "%s,%s,%s,0,Removed",
+                    nowStr, assetId, safeName
+                ))
+                tileStates[assetId] = nil
             end
         end
     end
