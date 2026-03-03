@@ -1,7 +1,3 @@
--- ============================================================
--- BSS MASTER V23 — Full rewrite, all bugs fixed
--- ============================================================
--- Stop any previous running instance cleanly before starting fresh
 _G.Running = false
 task.wait(0.1)
 _G.Running = true
@@ -18,14 +14,12 @@ local LocalPlayer= Players.LocalPlayer
 
 local connections = {}
 
--- [[ EXTERNAL LIBS ]]
+
 task.spawn(function()
     loadstring(game:HttpGet("https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source"))()
 end)
 
--- ============================================================
 -- 1. DATA
--- ============================================================
 local WEBHOOK = "https://discord.com/api/webhooks/1328668957774839819/5-ooyV3yMEsU46cfNtF9NV8a0kyNA0u2Q4xXxeK5HEroIU5yCwqIcmq-8MM7V0bYGBwI"
 
 local ImportantIDs = {
@@ -102,9 +96,8 @@ local BoosterOrder = {
     "Onett","Glue Dispenser"
 }
 
--- ============================================================
+
 -- 2. STATE
--- ============================================================
 -- Farming
 local isFarming          = false
 local currentField       = "Pine Tree Forest"
@@ -171,7 +164,7 @@ local RATE_WINDOW        = 10
 local rateHoneyHistory   = {}   -- {tick, honey} pairs
 local ratePollenHistory  = {}   -- {tick, pollen} pairs
 
--- ── Logging / CSV ──────────────────────────────────────────
+-- ── Logging / CSV
 local SAVE_INTERVAL     = 15
 local LOG_ROOT          = "BSSLogs"
 local ASSETS_DIR        = LOG_ROOT.."/Assets"
@@ -192,7 +185,7 @@ local assetImageDone = {}   -- assetId -> true once image download queued
 -- Balloon logging
 local balloonPollenNow   = -1   -- current value this tick (-1 = not found)
 
--- ── Folder helpers ──────────────────────────────────────────
+-- ── Folder helpers
 local function ensureDir(path)
     if not isfolder(path) then makefolder(path) end
 end
@@ -220,7 +213,7 @@ local function openNewFiles()
     currentTilesFile = makeLogFilename("tiles")
     if not isfile(currentStatsFile) then
         writefile(currentStatsFile,
-            "Timestamp,TotalHoney,HPS,CurrentHPS,Pollen,PPS,CurrentPPS,Capacity,Field,Converting,BalloonPollen\n")
+            "Timestamp,TotalHoney,HPS,CurrentHPS,Pollen,PPS,CurrentPPS,Capacity,Field,Converting,BalloonPollen,PlanterClaiming\n")
     end
     if not isfile(currentTilesFile) then
         writefile(currentTilesFile,
@@ -242,9 +235,7 @@ local function flushCSV()
     end
 end
 
--- ============================================================
 -- 3. UTILITIES
--- ============================================================
 -- UI references (populated by createUI — declared here as upvalues
 -- so booster dispatch and stats loop can reference them before createUI runs)
 local UI            = {}
@@ -271,7 +262,6 @@ end
 local function anchor()
     local _, hrp, hum = getChar()
     if hum then
-        hum.WalkSpeed   = 0
         hum.WalkToPoint = hrp and hrp.Position or Vector3.zero
     end
 end
@@ -279,7 +269,6 @@ end
 local function unanchor()
     local _, hrp, hum = getChar()
     if hum then
-        hum.WalkSpeed   = 16
         hum.WalkToPoint = hrp and hrp.Position or Vector3.zero
     end
 end
@@ -465,9 +454,7 @@ local function sendWebhook(body)
 end
 
 
--- ============================================================
 -- 4. UI
--- ============================================================
 local function createUI()
     local old = LocalPlayer.PlayerGui:FindFirstChild("BSS_V23_UI")
     if old then old:Destroy() end
@@ -783,9 +770,8 @@ local function createUI()
 end
 createUI()
 
--- ============================================================
+
 -- 5. POLLEN WATCHER
--- ============================================================
 table.insert(connections, RunService.Heartbeat:Connect(function()
     if not _G.Running then return end
     local cur = LocalPlayer.CoreStats.Pollen.Value
@@ -793,9 +779,9 @@ table.insert(connections, RunService.Heartbeat:Connect(function()
     lastPollenRaw = cur
 end))
 
--- ============================================================
+
 -- 6. MEMORY LEAK CLEANUP
--- ============================================================
+
 task.spawn(function()
     while _G.Running do
         task.wait(30)
@@ -807,9 +793,9 @@ task.spawn(function()
     end
 end)
 
--- ============================================================
+
 -- 7. MEMORY MATCH SOLVER
--- ============================================================
+
 task.spawn(function()
     local KnownCards, SolvedSlots, CurrentBoard = {}, {}, nil
     local OrderCounter = 0
@@ -1023,9 +1009,8 @@ task.spawn(function()
     end
 end)
 
--- ============================================================
+
 -- 8. WARNING DISK ENGINE
--- ============================================================
 local function refreshDisks()
     local p = workspace:FindFirstChild("Particles"); if not p then return end
     local n={}
@@ -1041,6 +1026,7 @@ end
 
 local function runDisks()
     if warnDisks.processing or #warnDisks.queue==0 then return end
+    if activeBooster or isClaimingPlanter then return end
     warnDisks.processing = true
     task.spawn(function()
         while #warnDisks.queue>0 do
@@ -1067,9 +1053,9 @@ local function runDisks()
     end)
 end
 
--- ============================================================
+
 -- 9. BOOSTER DISPATCH
--- ============================================================
+
 task.spawn(function()
     while _G.Running do
         task.wait(1)
@@ -1290,7 +1276,7 @@ task.spawn(function()
         if isConverting then
             logCap = rawCap
             lastValidCapacity = rawCap
-        elseif activeBooster or isCheckingBoosters then
+        elseif activeBooster or isCheckingBoosters or isClaimingPlanter then
             logCap = lastValidCapacity
         else
             if rawCap >= lastValidCapacity * 0.80 then
@@ -1339,7 +1325,7 @@ task.spawn(function()
             local cP    = LocalPlayer.CoreStats.Pollen.Value
             local bpStr = balloonPollenNow >= 0 and tostring(balloonPollenNow) or ""
             table.insert(statsBuffer, string.format(
-                "%s,%d,%d,%d,%d,%d,%d,%d,\"%s\",%s,%s",
+                "%s,%d,%d,%d,%d,%d,%d,%d,\"%s\",%s,%s,%s",
                 os.date("%Y-%m-%d %H:%M:%S"),
                 LocalPlayer.CoreStats.Honey.Value,
                 math.floor(hps),
@@ -1350,7 +1336,8 @@ task.spawn(function()
                 logCap,
                 currentField,
                 tostring(isConverting),
-                bpStr
+                bpStr,
+                tostring(isClaimingPlanter)
             ))
 
             if now - lastSaveTime >= SAVE_INTERVAL then
@@ -1453,6 +1440,110 @@ task.spawn(function()
 end)
 
 -- ============================================================
+-- 12.5. PLANTER TASK
+-- ============================================================
+task.spawn(function()
+    while _G.Running do
+        task.wait(2)
+        if not isFarming or isConverting or activeBooster or isSolvingMM or isCheckingBoosters or isClaimingPlanter then continue end
+
+        local pFolder = workspace:FindFirstChild("Planters")
+        if not pFolder then continue end
+
+        for _, planter in ipairs(pFolder:GetChildren()) do
+            local bulb = planter:FindFirstChild("PlanterBulb")
+            if not bulb then continue end
+
+            local guiAttach = bulb:FindFirstChild("GuiAttach")
+            local textLabel = guiAttach and guiAttach:FindFirstChild("Planter Gui") and guiAttach["Planter Gui"]:FindFirstChild("Bar") and guiAttach["Planter Gui"].Bar:FindFirstChild("TextLabel")
+            if not textLabel then continue end
+
+            local txt = textLabel.Text
+            if txt:find("100%.0%%") or txt:find("Ready") then
+                -- Find which field it's in
+                local pField = nil
+                for fname, fdata in pairs(Fields) do
+                    if bulb.Position.X >= fdata.bounds.x1 and bulb.Position.X <= fdata.bounds.x2 and
+                       bulb.Position.Z >= fdata.bounds.z1 and bulb.Position.Z <= fdata.bounds.z2 then
+                        pField = fname
+                        break
+                    end
+                end
+
+                if not pField then continue end
+
+                local pName = txt:match("^(.-) %(") or txt:match("^(.-)$")
+                if pName then
+                    isClaimingPlanter = true
+                    local _, hrp, hum = getChar()
+                    local bulbPos = bulb.Position
+
+                    -- 1. Heartbeat pin to snap HRP to bulb position
+                    local pinLoop = RunService.Heartbeat:Connect(function()
+                        if hrp then
+                            hrp.Velocity = Vector3.zero
+                            hrp.CFrame = CFrame.new(bulbPos)
+                        end
+                    end)
+                    
+                    task.wait(1.5)
+                    
+                    -- 2. Claim Planter
+                    pressE()
+                    task.wait(3)
+                    pinLoop:Disconnect()
+
+                    -- 3. Snapshot Collectibles
+                    local planterRewards = {}
+                    for _, obj in ipairs(workspace.Collectibles:GetChildren()) do
+                        if obj:IsA("BasePart") then
+                            local b = Fields[pField].bounds
+                            local pos = obj.Position
+                            if pos.X >= b.x1 and pos.X <= b.x2 and pos.Z >= b.z1 and pos.Z <= b.z2 then
+                                table.insert(planterRewards, obj)
+                                print("[BSS V23] Planter Reward Found:", obj.Name)
+                            end
+                        end
+                    end
+
+                    -- 4. Collect snapshot items (15s timeout)
+                    local tStart = tick()
+                    for _, token in ipairs(planterRewards) do
+                        if tick() - tStart > 15 then break end
+                        while token and token.Parent and (tick() - tStart <= 15) do
+                            local reached = stepToward(hrp, hum, token.Position, 4)
+                            if reached then break end
+                            task.wait(0.05)
+                        end
+                    end
+
+                    hum.WalkToPoint = hrp.Position -- Stop walking
+
+                    -- 5. Re-place Planter
+                    pinLoop = RunService.Heartbeat:Connect(function()
+                        if hrp then
+                            hrp.Velocity = Vector3.zero
+                            hrp.CFrame = CFrame.new(bulbPos)
+                        end
+                    end)
+                    task.wait(1)
+                    
+                    pcall(function()
+                        RepStorage.Events.PlayerActivesCommand:FireServer({Name = pName})
+                    end)
+                    task.wait(3)
+                    
+                    pinLoop:Disconnect()
+                    tpTo(fieldCenter())
+                    isClaimingPlanter = false
+                    break -- Only do one planter per cycle
+                end
+            end
+        end
+    end
+end)
+
+-- ============================================================
 -- 13. HEARTBEAT — failsafes only
 -- ============================================================
 table.insert(connections, RunService.Heartbeat:Connect(function()
@@ -1463,11 +1554,11 @@ table.insert(connections, RunService.Heartbeat:Connect(function()
     local _,hrp = getChar()
     if not hrp then return end
 
-    if activeBooster or isCheckingBoosters then
+    if activeBooster or isCheckingBoosters or isClaimingPlanter then
         hrp.Velocity = Vector3.new(0, hrp.Velocity.Y, 0)
     end
 
-    if not isConverting and not isCheckingBoosters and not activeBooster and not isSolvingMM then
+    if not isConverting and not isCheckingBoosters and not activeBooster and not isSolvingMM and not isClaimingPlanter then
         if not inField(hrp.Position) then
             if tick()-lastInField > 10 then tpTo(fieldCenter()); lastInField=tick() end
         else
@@ -1481,7 +1572,7 @@ end))
 -- ============================================================
 table.insert(connections, RunService.RenderStepped:Connect(function(dt)
     if not _G.Running or not isFarming then return end
-    if isConverting or isCheckingBoosters or activeBooster or isSolvingMM then return end
+    if isConverting or isCheckingBoosters or activeBooster or isSolvingMM or isClaimingPlanter then return end
 
     local _,hrp,hum = getChar()
     if not hrp or not hum then return end
