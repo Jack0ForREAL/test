@@ -771,6 +771,7 @@ local function createUI()
             lastSaveTime      = tick()
             lastValidCapacity = LocalPlayer.CoreStats.Capacity.Value
             openNewFiles()
+            tileTimesFile = ""  -- reset so 16b opens a fresh file for this session
             if not isCheckingBoosters and not boosterScanDone then
                 isCheckingBoosters = true
                 task.spawn(function()
@@ -1454,6 +1455,7 @@ task.spawn(function()
                 flushCSV()
                 openNewFiles()
                 tileStates    = {}   -- clear so all tiles re-log in the new file
+                tileTimesFile = ""   -- 16b will open a fresh tileTimes file next tick
                 hourRotateTime = now
             end
 
@@ -2118,6 +2120,98 @@ task.spawn(function()
                 ))
                 tileStates[assetId] = nil
             end
+        end
+    end
+end)
+
+-- ============================================================
+-- 16b. TILE TIME LOGGER
+-- Cycles through every active tile once per second, fires
+-- MouseEnter on each to populate MouseoverBox, reads the time
+-- from it, then logs to CSV.
+-- Only logs tiles that actually have a time string present.
+-- Handles: "20s", "50s", "5:50", "1:00:00"
+-- CSV columns: Timestamp, AssetID, AssetName, TimeRemaining
+-- ============================================================
+local tileTimesFile   = ""
+local tileTimesBuffer = {}
+
+local function openTileTimesFile()
+    local d = os.date("*t")
+    tileTimesFile = string.format("%s/tileTimes_%04d-%02d-%02d_%02dh.csv",
+        sessionFolder, d.year, d.month, d.day, d.hour)
+    if not isfile(tileTimesFile) then
+        writefile(tileTimesFile, "Timestamp,AssetID,AssetName,TimeRemaining\n")
+    end
+end
+
+local function parseTimeString(txt)
+    local t = txt:match("%d+:%d+:%d+")
+    if t then return t end
+    t = txt:match("%d+:%d+")
+    if t then return t end
+    t = txt:match("%d+s")
+    if t then return t end
+    return nil
+end
+
+task.spawn(function()
+    while _G.Running do
+        task.wait(1)
+        if not isFarming then continue end
+
+        local sg2 = LocalPlayer.PlayerGui:FindFirstChild("ScreenGui")
+        local grid = sg2 and sg2:FindFirstChild("TileGrid")
+        local mouseoverBox = sg2 and sg2:FindFirstChild("MouseoverBox")
+        if not grid or not mouseoverBox then continue end
+
+        if tileTimesFile == "" and sessionFolder ~= "" then
+            openTileTimesFile()
+        end
+        if tileTimesFile == "" then continue end
+
+        local nowStr = os.date("%Y-%m-%d %H:%M:%S")
+
+        for _, tile in ipairs(grid:GetChildren()) do
+            if tile.Name ~= "IconTile" then continue end
+            local bg = tile:FindFirstChild("BG")
+            if not bg then continue end
+            local iconLbl = bg:FindFirstChild("Icon")
+            if not iconLbl then continue end
+            local assetId = (iconLbl.Image or ""):match("%d+")
+            if not assetId then continue end
+
+            -- Fire MouseEnter to populate MouseoverBox
+            local ok = pcall(function()
+                for _, conn in pairs(getconnections(tile.MouseEnter)) do conn:Fire() end
+            end)
+            if not ok then continue end
+
+            -- Wait one frame for the game to update MouseoverBox
+            RunService.Heartbeat:Wait()
+
+            local timeStr = parseTimeString(mouseoverBox.Text or "")
+
+            -- Fire MouseLeave to clean up
+            pcall(function()
+                for _, conn in pairs(getconnections(tile.MouseLeave)) do conn:Fire() end
+            end)
+
+            if not timeStr then continue end
+
+            local name = getAssetName(assetId)
+            local safeName = '"'..name:gsub('"', '""')..'"'
+            table.insert(tileTimesBuffer, string.format(
+                "%s,%s,%s,%s",
+                nowStr, assetId, safeName, timeStr
+            ))
+
+            task.wait(0.05) -- small yield between tiles
+        end
+
+        if #tileTimesBuffer > 0 then
+            appendfile(tileTimesFile, table.concat(tileTimesBuffer, "\n").."\n")
+            tileTimesBuffer = {}
         end
     end
 end)
