@@ -178,10 +178,12 @@ local LOG_ROOT          = "BSSLogs"
 local ASSETS_DIR        = LOG_ROOT.."/Assets"
 local statsBuffer       = {}
 local tilesBuffer       = {}
+local tileTimesBuffer   = {}
 local lastSaveTime      = tick()
 local hourRotateTime    = tick()
 local currentStatsFile  = ""
 local currentTilesFile  = ""
+local tileTimesFile     = ""
 
 -- Capacity filter
 local lastValidCapacity  = 0   -- set properly on farming start; 0 triggers auto-init
@@ -759,6 +761,8 @@ local function createUI()
             balloonPollenNow  = -1
             rateHoneyHistory  = {}
             ratePollenHistory = {}
+            rateHoneyStart    = 1
+            ratePollenStart   = 1
 
             -- New session every time farming starts
             -- Open files FIRST so flushCSV has valid paths
@@ -1039,6 +1043,7 @@ task.spawn(function()
 
     while _G.Running do
         task.wait(0.1)
+        if isClaimingPlanter or activeBooster or isCheckingBoosters then continue end
         local board = getBoard()
 
         if not board then
@@ -1169,7 +1174,7 @@ task.spawn(function()
         task.wait(1)
         if not isFarming then continue end
         if #boosterQueue == 0 then continue end
-        if isConverting or activeBooster or warnDisks.processing or isSolvingMM or isCheckingBoosters then continue end
+        if isConverting or activeBooster or warnDisks.processing or isSolvingMM or isCheckingBoosters or isClaimingPlanter then continue end
 
         activeBooster = true
         local b = table.remove(boosterQueue, 1)
@@ -1569,7 +1574,7 @@ end)
 task.spawn(function()
     while _G.Running do
         task.wait(0.5)
-        if not isFarming or isConverting or activeBooster or isCheckingBoosters or isSolvingMM then continue end
+        if not isFarming or isConverting or activeBooster or isCheckingBoosters or isSolvingMM or isClaimingPlanter then continue end
         if sprinklerField == currentField then continue end
         tpTo(fieldCenter())
         task.wait(0.6)
@@ -2133,8 +2138,6 @@ end)
 -- Handles: "20s", "50s", "5:50", "1:00:00"
 -- CSV columns: Timestamp, AssetID, AssetName, TimeRemaining
 -- ============================================================
-local tileTimesFile   = ""
-local tileTimesBuffer = {}
 
 local function openTileTimesFile()
     local d = os.date("*t")
