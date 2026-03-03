@@ -160,9 +160,12 @@ local totalMMRewards     = {}
 local assetNameCache     = {}
 
 -- Rolling current-rate window (10s)
+-- Uses a start-index pointer instead of table.remove(t,1) to avoid O(n) shifts.
 local RATE_WINDOW        = 10
-local rateHoneyHistory   = {}   -- {tick, honey} pairs
-local ratePollenHistory  = {}   -- {tick, pollen} pairs
+local rateHoneyHistory   = {}   -- {t, v} pairs
+local ratePollenHistory  = {}   -- {t, v} pairs
+local rateHoneyStart     = 1    -- oldest valid index into rateHoneyHistory
+local ratePollenStart    = 1    -- oldest valid index into ratePollenHistory
 
 -- ── Logging / CSV
 local SAVE_INTERVAL     = 15
@@ -184,6 +187,10 @@ local assetImageDone = {}   -- assetId -> true once image download queued
 
 -- Balloon logging
 local balloonPollenNow   = -1   -- current value this tick (-1 = not found)
+
+-- Balloon cache — avoids workspace:GetDescendants() every second
+local cachedBalloonPart  = nil  -- saved BalloonBody reference
+local cachedHivePos      = nil  -- hive position never moves; resolved once
 
 -- ── Folder helpers
 local function ensureDir(path)
@@ -299,6 +306,8 @@ local function inField(pos)
     return pos.X>=b.x1 and pos.X<=b.x2 and pos.Z>=b.z1 and pos.Z<=b.z2
 end
 
+-- getHivePos: resolved once and cached — the hive never moves.
+-- Call getHivePosOnce() everywhere instead of getHivePos().
 local function getHivePos()
     local h = workspace:FindFirstChild("Honeycombs")
     if not h then return nil end
@@ -312,17 +321,23 @@ local function getHivePos()
     return nil
 end
 
--- Read pollen stored in the nearest BalloonBody to the hive teleport position.
--- Returns integer value, or -1 if no balloon within radius or any error occurs.
-local BALLOON_SEARCH_RADIUS = 30
-local function readNearestBalloon()
-    local ok0, hPos = pcall(getHivePos)
-    if not ok0 or not hPos then return -1 end
+local function getHivePosOnce()
+    if not cachedHivePos then
+        cachedHivePos = getHivePos()
+    end
+    return cachedHivePos
+end
 
+-- Read pollen from the balloon near the hive.
+-- Caches the BalloonBody reference so we never call GetDescendants() again
+-- unless the cached part disappears (e.g. balloon despawned or replaced).
+local BALLOON_SEARCH_RADIUS = 30
+
+local function findNearestBalloon(hPos)
+    -- Full workspace scan — only runs when cache is cold or balloon is gone.
     local best, bestDist = nil, BALLOON_SEARCH_RADIUS
     local okD, desc = pcall(function() return workspace:GetDescendants() end)
-    if not okD or not desc then return -1 end
-
+    if not okD or not desc then return nil end
     for _, obj in ipairs(desc) do
         if obj and obj.Parent and obj.Name == "BalloonBody" and obj:IsA("BasePart") then
             local okP, d = pcall(function() return (obj.Position - hPos).Magnitude end)
@@ -332,12 +347,29 @@ local function readNearestBalloon()
             end
         end
     end
-    if not best or not best.Parent then return -1 end
+    return best
+end
 
+local function readNearestBalloon()
+    -- Resolve hive position once (cached)
+    local hPos = getHivePosOnce()
+    if not hPos then return -1 end
+
+    -- If cached balloon is gone, run the expensive scan to find a new one
+    if not cachedBalloonPart or not cachedBalloonPart.Parent then
+        cachedBalloonPart = findNearestBalloon(hPos)
+    end
+    if not cachedBalloonPart or not cachedBalloonPart.Parent then return -1 end
+
+    -- Fast path: just read the cached part's TextLabel directly
     local okT, val = pcall(function()
-        return best.GuiAttach.Gui.Bar.TextLabel.Text
+        return cachedBalloonPart.GuiAttach.Gui.Bar.TextLabel.Text
     end)
-    if not okT or not val or val == "" then return -1 end
+    if not okT or not val or val == "" then
+        -- TextLabel read failed — balloon may have been replaced; invalidate cache
+        cachedBalloonPart = nil
+        return -1
+    end
 
     return tonumber(val:gsub("[,%s]", "")) or -1
 end
@@ -945,11 +977,15 @@ task.spawn(function()
         if #CurrentWinnings == 0 then return end
         local fields = {}
         for _,w in ipairs(CurrentWinnings) do
-            local name = getAssetName(w.id)
+            local name = getAssetName(w.id)  -- sync here is fine: onMMDone runs once after the board closes
             local amt  = w.count~="" and w.count or "x1"
             table.insert(fields,{name=name,value="Amount: "..amt,inline=true})
             local cnt = tonumber(amt:match("%d+")) or 1
             totalMMRewards[w.id] = (totalMMRewards[w.id] or 0) + cnt
+            -- Pre-warm cache for the stats UI so it never makes a network call on the 1s tick
+            if not assetNameCache[w.id] then
+                task.spawn(function() getAssetName(w.id) end)
+            end
         end
         sendWebhook({embeds={{title="🎉 "..(activeMM or "MM").." Winnings",color=16776960,fields=fields,timestamp=os.date("!%Y-%m-%dT%H:%M:%SZ")}}})
     end
@@ -1011,7 +1047,13 @@ end)
 
 
 -- 8. WARNING DISK ENGINE
+-- disksDirty is set by a ChildAdded listener on workspace.Particles.
+-- refreshDisks() now only runs when something actually appeared —
+-- never on every Heartbeat frame.
+local disksDirty = false
+
 local function refreshDisks()
+    disksDirty = false
     local p = workspace:FindFirstChild("Particles"); if not p then return end
     local n={}
     for _,d in ipairs(p:GetChildren()) do
@@ -1023,6 +1065,25 @@ local function refreshDisks()
     table.sort(n,function(a,b) return (1-a.Transparency)>(1-b.Transparency) end)
     warnDisks.queue = n
 end
+
+-- Wire up the ChildAdded listener as soon as Particles exists (or wait for it).
+local function hookParticles()
+    local p = workspace:FindFirstChild("Particles")
+    if p then
+        table.insert(connections, p.ChildAdded:Connect(function(child)
+            if child.Name == "WarningDisk" then disksDirty = true end
+        end))
+    else
+        table.insert(connections, workspace.ChildAdded:Connect(function(child)
+            if child.Name == "Particles" then
+                table.insert(connections, child.ChildAdded:Connect(function(c)
+                    if c.Name == "WarningDisk" then disksDirty = true end
+                end))
+            end
+        end))
+    end
+end
+hookParticles()
 
 local function runDisks()
     if warnDisks.processing or #warnDisks.queue==0 then return end
@@ -1292,18 +1353,25 @@ task.spawn(function()
         local nowPollen = LocalPlayer.CoreStats.Pollen.Value + totalPollen  -- total pollen seen
         table.insert(rateHoneyHistory,  {t=now, v=nowHoney})
         table.insert(ratePollenHistory, {t=now, v=nowPollen})
-        -- Trim entries older than RATE_WINDOW
-        while #rateHoneyHistory  > 1 and now - rateHoneyHistory[1].t  > RATE_WINDOW do table.remove(rateHoneyHistory,  1) end
-        while #ratePollenHistory > 1 and now - ratePollenHistory[1].t > RATE_WINDOW do table.remove(ratePollenHistory, 1) end
-        -- Compute current rate from oldest entry in window
-        local currentHPS, currentPPS = hps, pps  -- fallback to session avg
-        if #rateHoneyHistory >= 2 then
-            local dt = rateHoneyHistory[#rateHoneyHistory].t - rateHoneyHistory[1].t
-            if dt > 0 then currentHPS = (rateHoneyHistory[#rateHoneyHistory].v - rateHoneyHistory[1].v) / dt end
+        -- Advance start pointer past entries older than RATE_WINDOW
+        -- (never shifts the array — O(1) per call instead of O(n))
+        while rateHoneyStart < #rateHoneyHistory and now - rateHoneyHistory[rateHoneyStart].t > RATE_WINDOW do
+            rateHoneyStart = rateHoneyStart + 1
         end
-        if #ratePollenHistory >= 2 then
-            local dt = ratePollenHistory[#ratePollenHistory].t - ratePollenHistory[1].t
-            if dt > 0 then currentPPS = (ratePollenHistory[#ratePollenHistory].v - ratePollenHistory[1].v) / dt end
+        while ratePollenStart < #ratePollenHistory and now - ratePollenHistory[ratePollenStart].t > RATE_WINDOW do
+            ratePollenStart = ratePollenStart + 1
+        end
+        -- Compute current rate from oldest entry still in window
+        local currentHPS, currentPPS = hps, pps  -- fallback to session avg
+        local hLen = #rateHoneyHistory
+        if hLen - rateHoneyStart >= 1 then
+            local dt = rateHoneyHistory[hLen].t - rateHoneyHistory[rateHoneyStart].t
+            if dt > 0 then currentHPS = (rateHoneyHistory[hLen].v - rateHoneyHistory[rateHoneyStart].v) / dt end
+        end
+        local pLen = #ratePollenHistory
+        if pLen - ratePollenStart >= 1 then
+            local dt = ratePollenHistory[pLen].t - ratePollenHistory[ratePollenStart].t
+            if dt > 0 then currentPPS = (ratePollenHistory[pLen].v - ratePollenHistory[ratePollenStart].v) / dt end
         end
 
         -- ── Balloon pollen reading ───────────────────────────────────
@@ -1548,7 +1616,9 @@ end)
 -- ============================================================
 table.insert(connections, RunService.Heartbeat:Connect(function()
     if not _G.Running then return end
-    refreshDisks()
+
+    -- Only refresh disk queue when ChildAdded flagged a new WarningDisk
+    if disksDirty then refreshDisks() end
 
     if not isFarming then return end
     local _,hrp = getChar()
