@@ -1590,9 +1590,8 @@ task.spawn(function()
 
         -- Pass 1: update progress for all visible planters
         local seenPlanters = {}
-        for _, planter in ipairs(pFolder:GetChildren()) do
-            local bulb = planter:FindFirstChild("PlanterBulb")
-            if not bulb then continue end
+        for _, bulb in ipairs(pFolder:GetChildren()) do
+            if bulb.Name ~= "PlanterBulb" then continue end
 
             local guiAttach = bulb:FindFirstChild("Gui Attach")
             local textLabel = guiAttach and guiAttach:FindFirstChild("Planter Gui") and guiAttach["Planter Gui"]:FindFirstChild("Bar") and guiAttach["Planter Gui"].Bar:FindFirstChild("TextLabel")
@@ -1613,11 +1612,9 @@ task.spawn(function()
         end
 
         -- Pass 2: claim any planter at 100%
-        for _, planter in ipairs(pFolder:GetChildren()) do
+        for _, bulb in ipairs(pFolder:GetChildren()) do
             if isClaimingPlanter then break end
-
-            local bulb = planter:FindFirstChild("PlanterBulb")
-            if not bulb then continue end
+            if bulb.Name ~= "PlanterBulb" then continue end
 
             local guiAttach = bulb:FindFirstChild("Gui Attach")
             local textLabel = guiAttach and guiAttach:FindFirstChild("Planter Gui") and guiAttach["Planter Gui"]:FindFirstChild("Bar") and guiAttach["Planter Gui"].Bar:FindFirstChild("TextLabel")
