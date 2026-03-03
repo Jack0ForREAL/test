@@ -148,6 +148,11 @@ local collectBlooms      = true
 local collectedPetals    = {}
 local knownBloomPos      = {}
 
+-- Planter
+local isClaimingPlanter  = false
+local planterProgress    = {}  -- name -> "XX.X%" string, updated every 2s scan
+local totalPlanterRewards= {}  -- assetId -> count, accumulated across all claims
+
 -- Stats
 local totalPollen        = 0
 local lastPollenRaw      = LocalPlayer.CoreStats.Pollen.Value
@@ -618,22 +623,62 @@ local function createUI()
 
     -- ── STATS TAB ──
     local statsTab = tabFrames["Stats"]
-    local toggleBtn = btn(statsTab,"View: Session Total",Color3.fromRGB(35,55,100),1)
-    div(statsTab,2)
-    local hS  = lbl(statsTab,"  H/s:  0",  Color3.fromRGB(255,220,100),3)
-    local hM  = lbl(statsTab,"  H/m:  0",  Color3.fromRGB(255,220,100),4)
-    local hH  = lbl(statsTab,"  H/h:  0",  Color3.fromRGB(255,220,100),5)
-    div(statsTab,6)
-    local pS  = lbl(statsTab,"  P/s:  0",  Color3.fromRGB(100,200,255),7)
-    local pM  = lbl(statsTab,"  P/m:  0",  Color3.fromRGB(100,200,255),8)
-    local pH  = lbl(statsTab,"  P/h:  0",  Color3.fromRGB(100,200,255),9)
-    div(statsTab,10)
-    local totLbl  = lbl(statsTab,"  Total Honey:  0",Color3.fromRGB(255,200,60),11)
-    local timeLbl = lbl(statsTab,"  Runtime:  00:00:00",nil,12)
-    div(statsTab,13)
-    lbl(statsTab,"  ── MM Rewards ──",Color3.fromRGB(255,255,80),14)
-    local mmLbl = lbl(statsTab,"  No rewards yet.",Color3.fromRGB(200,200,200),15,200)
+    -- Wrap everything in a ScrollingFrame so it never clips off-screen
+    local statsScroll = Instance.new("ScrollingFrame", statsTab)
+    statsScroll.Size=UDim2.new(1,0,1,0); statsScroll.Position=UDim2.new(0,0,0,0)
+    statsScroll.BackgroundTransparency=1; statsScroll.ScrollBarThickness=3
+    statsScroll.ScrollBarImageColor3=Color3.fromRGB(80,80,120)
+    statsScroll.AutomaticCanvasSize=Enum.AutomaticSize.Y; statsScroll.CanvasSize=UDim2.new(0,0,0,0)
+    statsScroll.Active=true
+    local statsScrollLay = Instance.new("UIListLayout", statsScroll)
+    statsScrollLay.Padding=UDim.new(0,4); statsScrollLay.SortOrder=Enum.SortOrder.LayoutOrder
+
+    -- Re-define lbl/div locally to target statsScroll
+    local function slbl(text, color, order, h)
+        local l = Instance.new("TextLabel", statsScroll)
+        l.Size=UDim2.new(1,-6,0,h or 20); l.BackgroundTransparency=1
+        l.Text=text; l.TextColor3=color or Color3.new(1,1,1)
+        l.Font=Enum.Font.Code; l.TextSize=13
+        l.TextXAlignment=Enum.TextXAlignment.Left; l.LayoutOrder=order or 0
+        return l
+    end
+    local function sdiv(order)
+        local d = Instance.new("Frame", statsScroll)
+        d.Size=UDim2.new(1,-6,0,1); d.BackgroundColor3=Color3.fromRGB(45,45,60)
+        d.BorderSizePixel=0; d.LayoutOrder=order or 0
+    end
+    local function sbtn(text, color, order)
+        local b = Instance.new("TextButton", statsScroll)
+        b.Size=UDim2.new(1,-6,0,26); b.BackgroundColor3=color or Color3.fromRGB(40,40,55)
+        b.BorderSizePixel=0; b.Text=text; b.TextColor3=Color3.new(1,1,1)
+        b.Font=Enum.Font.SourceSansBold; b.TextSize=13; b.LayoutOrder=order or 0
+        return b
+    end
+
+    local toggleBtn = sbtn("View: Session Total",Color3.fromRGB(35,55,100),1)
+    sdiv(2)
+    local hS  = slbl("  H/s:  0",  Color3.fromRGB(255,220,100),3)
+    local hM  = slbl("  H/m:  0",  Color3.fromRGB(255,220,100),4)
+    local hH  = slbl("  H/h:  0",  Color3.fromRGB(255,220,100),5)
+    sdiv(6)
+    local pS  = slbl("  P/s:  0",  Color3.fromRGB(100,200,255),7)
+    local pM  = slbl("  P/m:  0",  Color3.fromRGB(100,200,255),8)
+    local pH  = slbl("  P/h:  0",  Color3.fromRGB(100,200,255),9)
+    sdiv(10)
+    local totLbl  = slbl("  Total Honey:  0",Color3.fromRGB(255,200,60),11)
+    local timeLbl = slbl("  Runtime:  00:00:00",nil,12)
+    sdiv(13)
+    slbl("  ── MM Rewards ──",Color3.fromRGB(255,255,80),14)
+    local mmLbl = slbl("  No rewards yet.",Color3.fromRGB(200,200,200),15,20)
     mmLbl.TextWrapped=true; mmLbl.TextYAlignment=Enum.TextYAlignment.Top
+    sdiv(16)
+    slbl("  ── Planters ──",Color3.fromRGB(180,255,180),17)
+    local planterProgressLbl = slbl("  No planters found.",Color3.fromRGB(160,220,160),18,20)
+    planterProgressLbl.TextWrapped=true; planterProgressLbl.TextYAlignment=Enum.TextYAlignment.Top
+    sdiv(19)
+    slbl("  ── Planter Rewards ──",Color3.fromRGB(180,255,180),20)
+    local planterRewardsLbl = slbl("  No rewards yet.",Color3.fromRGB(160,220,160),21,20)
+    planterRewardsLbl.TextWrapped=true; planterRewardsLbl.TextYAlignment=Enum.TextYAlignment.Top
 
     toggleBtn.MouseButton1Click:Connect(function()
         showInterval = not showInterval
@@ -642,7 +687,8 @@ local function createUI()
     end)
 
     UI = { hS=hS,hM=hM,hH=hH,pS=pS,pM=pM,pH=pH,total=totLbl,time=timeLbl,mm=mmLbl,
-           status=statusLbl, fieldLbl=fieldActiveLbl }
+           status=statusLbl, fieldLbl=fieldActiveLbl,
+           planterProgress=planterProgressLbl, planterRewards=planterRewardsLbl }
 
     -- ── BOOST TAB ──
     local boostTab = tabFrames["Boost"]
@@ -1324,7 +1370,31 @@ task.spawn(function()
             for id,cnt in pairs(totalMMRewards) do
                 table.insert(lines, "  "..getAssetName(id)..": x"..cnt)
             end
-            UI.mm.Text = #lines > 0 and table.concat(lines, "\n") or "  No rewards yet."
+            local mmText = #lines > 0 and table.concat(lines, "\n") or "  No rewards yet."
+            UI.mm.Text = mmText
+            UI.mm.Size = UDim2.new(1,-6,0, math.max(20, #lines * 18))
+
+            -- Planter progress
+            if UI.planterProgress then
+                local pLines = {}
+                for name, prog in pairs(planterProgress) do
+                    table.insert(pLines, "  "..name..":  "..prog)
+                end
+                local pText = #pLines > 0 and table.concat(pLines, "\n") or "  No planters found."
+                UI.planterProgress.Text = pText
+                UI.planterProgress.Size = UDim2.new(1,-6,0, math.max(20, #pLines * 18))
+            end
+
+            -- Planter rewards
+            if UI.planterRewards then
+                local rLines = {}
+                for id,cnt in pairs(totalPlanterRewards) do
+                    table.insert(rLines, "  "..getAssetName(id)..": x"..cnt)
+                end
+                local rText = #rLines > 0 and table.concat(rLines, "\n") or "  No rewards yet."
+                UI.planterRewards.Text = rText
+                UI.planterRewards.Size = UDim2.new(1,-6,0, math.max(20, #rLines * 18))
+            end
         end
 
         -- ── Capacity filter ──────────────────────────────────────────
@@ -1518,95 +1588,136 @@ task.spawn(function()
         local pFolder = workspace:FindFirstChild("Planters")
         if not pFolder then continue end
 
+        -- Pass 1: update progress for all visible planters
+        local seenPlanters = {}
         for _, planter in ipairs(pFolder:GetChildren()) do
             local bulb = planter:FindFirstChild("PlanterBulb")
             if not bulb then continue end
 
-            local guiAttach = bulb:FindFirstChild("GuiAttach")
+            local guiAttach = bulb:FindFirstChild("Gui Attach")
             local textLabel = guiAttach and guiAttach:FindFirstChild("Planter Gui") and guiAttach["Planter Gui"]:FindFirstChild("Bar") and guiAttach["Planter Gui"].Bar:FindFirstChild("TextLabel")
             if not textLabel then continue end
 
             local txt = textLabel.Text
-            if txt:find("100%.0%%") or txt:find("Ready") then
-                -- Find which field it's in
-                local pField = nil
-                for fname, fdata in pairs(Fields) do
-                    if bulb.Position.X >= fdata.bounds.x1 and bulb.Position.X <= fdata.bounds.x2 and
-                       bulb.Position.Z >= fdata.bounds.z1 and bulb.Position.Z <= fdata.bounds.z2 then
-                        pField = fname
-                        break
-                    end
-                end
+            local displayName = txt:match("^(.-) %(") or txt:match("^(.-)%s*$") or txt
+            if #displayName > 24 then displayName = displayName:sub(1,22).."…" end
 
-                if not pField then continue end
+            local pct = txt:match("(%d+%.?%d*%%)")
+            local progStr = pct or (txt:lower():find("ready") and "Ready" or "?")
+            planterProgress[displayName] = progStr
+            seenPlanters[displayName] = true
+        end
+        -- Remove planters that have disappeared
+        for k in pairs(planterProgress) do
+            if not seenPlanters[k] then planterProgress[k] = nil end
+        end
 
-                local pName = txt:match("^(.-) %(") or txt:match("^(.-)$")
-                if pName then
-                    isClaimingPlanter = true
-                    local _, hrp, hum = getChar()
-                    local bulbPos = bulb.Position
+        -- Pass 2: claim any planter at 100%
+        for _, planter in ipairs(pFolder:GetChildren()) do
+            if isClaimingPlanter then break end
 
-                    -- 1. Heartbeat pin to snap HRP to bulb position
-                    local pinLoop = RunService.Heartbeat:Connect(function()
-                        if hrp then
-                            hrp.Velocity = Vector3.zero
-                            hrp.CFrame = CFrame.new(bulbPos)
-                        end
-                    end)
-                    
-                    task.wait(1.5)
-                    
-                    -- 2. Claim Planter
-                    pressE()
-                    task.wait(3)
-                    pinLoop:Disconnect()
+            local bulb = planter:FindFirstChild("PlanterBulb")
+            if not bulb then continue end
 
-                    -- 3. Snapshot Collectibles
-                    local planterRewards = {}
-                    for _, obj in ipairs(workspace.Collectibles:GetChildren()) do
-                        if obj:IsA("BasePart") then
-                            local b = Fields[pField].bounds
-                            local pos = obj.Position
-                            if pos.X >= b.x1 and pos.X <= b.x2 and pos.Z >= b.z1 and pos.Z <= b.z2 then
-                                table.insert(planterRewards, obj)
-                                print("[BSS V23] Planter Reward Found:", obj.Name)
-                            end
-                        end
-                    end
+            local guiAttach = bulb:FindFirstChild("Gui Attach")
+            local textLabel = guiAttach and guiAttach:FindFirstChild("Planter Gui") and guiAttach["Planter Gui"]:FindFirstChild("Bar") and guiAttach["Planter Gui"].Bar:FindFirstChild("TextLabel")
+            if not textLabel then continue end
 
-                    -- 4. Collect snapshot items (15s timeout)
-                    local tStart = tick()
-                    for _, token in ipairs(planterRewards) do
-                        if tick() - tStart > 15 then break end
-                        while token and token.Parent and (tick() - tStart <= 15) do
-                            local reached = stepToward(hrp, hum, token.Position, 4)
-                            if reached then break end
-                            task.wait(0.05)
-                        end
-                    end
+            local txt = textLabel.Text
+            local pct = txt:match("(%d+%.?%d*)%%")
+            local isReady = (pct and tonumber(pct) >= 100) or txt:lower():find("ready")
+            if not isReady then continue end
 
-                    hum.WalkToPoint = hrp.Position -- Stop walking
-
-                    -- 5. Re-place Planter
-                    pinLoop = RunService.Heartbeat:Connect(function()
-                        if hrp then
-                            hrp.Velocity = Vector3.zero
-                            hrp.CFrame = CFrame.new(bulbPos)
-                        end
-                    end)
-                    task.wait(1)
-                    
-                    pcall(function()
-                        RepStorage.Events.PlayerActivesCommand:FireServer({Name = pName})
-                    end)
-                    task.wait(3)
-                    
-                    pinLoop:Disconnect()
-                    tpTo(fieldCenter())
-                    isClaimingPlanter = false
-                    break -- Only do one planter per cycle
+            -- Find which field the planter is in
+            local pField = nil
+            for fname, fdata in pairs(Fields) do
+                if bulb.Position.X >= fdata.bounds.x1 and bulb.Position.X <= fdata.bounds.x2 and
+                   bulb.Position.Z >= fdata.bounds.z1 and bulb.Position.Z <= fdata.bounds.z2 then
+                    pField = fname
+                    break
                 end
             end
+            if not pField then continue end
+
+            local pName = txt:match("^(.-) %(") or txt:match("^(.-)%s*$")
+            if not pName then continue end
+
+            isClaimingPlanter = true
+            local _, hrp, hum = getChar()
+            local bulbPos = bulb.Position
+
+            -- 1. Heartbeat pin to snap HRP to bulb position
+            local pinLoop = RunService.Heartbeat:Connect(function()
+                if hrp then
+                    hrp.Velocity = Vector3.zero
+                    hrp.CFrame = CFrame.new(bulbPos)
+                end
+            end)
+
+            task.wait(1.5)
+
+            -- 2. Claim Planter
+            pressE()
+            task.wait(3)
+            pinLoop:Disconnect()
+
+            -- 3. Snapshot Collectibles
+            local planterRewards = {}
+            for _, obj in ipairs(workspace.Collectibles:GetChildren()) do
+                if obj:IsA("BasePart") then
+                    local b = Fields[pField].bounds
+                    local pos = obj.Position
+                    if pos.X >= b.x1 and pos.X <= b.x2 and pos.Z >= b.z1 and pos.Z <= b.z2 then
+                        table.insert(planterRewards, obj)
+                        -- Resolve asset ID for tracking
+                        local partID = obj.Name
+                        local img = obj:FindFirstChildWhichIsA("Decal") or obj:FindFirstChildWhichIsA("SpecialMesh")
+                        if img then
+                            local tex = tostring(img.Texture or img.MeshId or "")
+                            local extracted = tex:match("%d+")
+                            if extracted then partID = extracted end
+                        end
+                        totalPlanterRewards[partID] = (totalPlanterRewards[partID] or 0) + 1
+                        -- Pre-warm name cache async
+                        if not assetNameCache[partID] then
+                            task.spawn(function() getAssetName(partID) end)
+                        end
+                        print("[BSS V23] Planter Reward Found:", obj.Name)
+                    end
+                end
+            end
+
+            -- 4. Collect snapshot items (15s timeout)
+            local tStart = tick()
+            for _, token in ipairs(planterRewards) do
+                if tick() - tStart > 15 then break end
+                while token and token.Parent and (tick() - tStart <= 15) do
+                    local reached = stepToward(hrp, hum, token.Position, 4)
+                    if reached then break end
+                    task.wait(0.05)
+                end
+            end
+
+            hum.WalkToPoint = hrp.Position -- Stop walking
+
+            -- 5. Re-place Planter
+            pinLoop = RunService.Heartbeat:Connect(function()
+                if hrp then
+                    hrp.Velocity = Vector3.zero
+                    hrp.CFrame = CFrame.new(bulbPos)
+                end
+            end)
+            task.wait(1)
+
+            pcall(function()
+                RepStorage.Events.PlayerActivesCommand:FireServer({Name = pName})
+            end)
+            task.wait(3)
+
+            pinLoop:Disconnect()
+            tpTo(fieldCenter())
+            isClaimingPlanter = false
+            break -- Only do one planter per cycle
         end
     end
 end)
