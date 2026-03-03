@@ -1643,22 +1643,21 @@ task.spawn(function()
             local _, hrp, hum = getChar()
             local bulbPos = bulb.Position
 
-            -- 1. Heartbeat pin to snap HRP to bulb position
-            local pinLoop = RunService.Heartbeat:Connect(function()
-                if hrp then
-                    hrp.Velocity = Vector3.zero
-                    hrp.CFrame = CFrame.new(bulbPos)
-                end
-            end)
+            -- 1. Teleport to bulb once, then anchor (zeros X/Z only via WalkToPoint)
+            --    Player will drop naturally — this makes the collect button appear
+            tpTo(bulbPos)
+            anchor()
 
             task.wait(1.5)
 
-            -- 2. Claim Planter
+            -- 2. Press E to claim
             pressE()
-            task.wait(3)
-            pinLoop:Disconnect()
 
-            -- 3. Snapshot Collectibles
+            -- 3. Disconnect anchor, wait 3s then snapshot collectibles
+            unanchor()
+            task.wait(3)
+
+            -- 4. Snapshot Collectibles
             local planterRewards = {}
             for _, obj in ipairs(workspace.Collectibles:GetChildren()) do
                 if obj:IsA("BasePart") then
@@ -1666,7 +1665,6 @@ task.spawn(function()
                     local pos = obj.Position
                     if pos.X >= b.x1 and pos.X <= b.x2 and pos.Z >= b.z1 and pos.Z <= b.z2 then
                         table.insert(planterRewards, obj)
-                        -- Resolve asset ID for tracking
                         local partID = obj.Name
                         local img = obj:FindFirstChildWhichIsA("Decal") or obj:FindFirstChildWhichIsA("SpecialMesh")
                         if img then
@@ -1675,7 +1673,6 @@ task.spawn(function()
                             if extracted then partID = extracted end
                         end
                         totalPlanterRewards[partID] = (totalPlanterRewards[partID] or 0) + 1
-                        -- Pre-warm name cache async
                         if not assetNameCache[partID] then
                             task.spawn(function() getAssetName(partID) end)
                         end
@@ -1684,7 +1681,7 @@ task.spawn(function()
                 end
             end
 
-            -- 4. Collect snapshot items (15s timeout)
+            -- 5. Walk to each reward token
             local tStart = tick()
             for _, token in ipairs(planterRewards) do
                 if tick() - tStart > 15 then break end
@@ -1695,26 +1692,24 @@ task.spawn(function()
                 end
             end
 
-            hum.WalkToPoint = hrp.Position -- Stop walking
+            hum.WalkToPoint = hrp.Position -- stop walking
 
-            -- 5. Re-place Planter
-            pinLoop = RunService.Heartbeat:Connect(function()
-                if hrp then
-                    hrp.Velocity = Vector3.zero
-                    hrp.CFrame = CFrame.new(bulbPos)
-                end
-            end)
+            -- 6. Teleport back to bulb and anchor so replant registers
+            tpTo(bulbPos)
+            anchor()
             task.wait(1)
 
+            -- 7. Replant
             pcall(function()
                 RepStorage.Events.PlayerActivesCommand:FireServer({Name = pName})
             end)
-            task.wait(3)
 
-            pinLoop:Disconnect()
+            -- 8. Wait, unanchor, return to field
+            task.wait(3)
+            unanchor()
             tpTo(fieldCenter())
             isClaimingPlanter = false
-            break -- Only do one planter per cycle
+            break -- only one planter per cycle
         end
     end
 end)
