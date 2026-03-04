@@ -378,7 +378,7 @@ local function readNearestBalloon()
         return -1
     end
 
-    return tonumber(val:gsub("[,%s]", "")) or -1
+    return tonumber((val:gsub("[,%s]", ""))) or -1
 end
 
 local function parseCooldown(txt)
