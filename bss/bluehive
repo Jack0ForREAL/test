@@ -85,6 +85,7 @@ local FieldOrder = {
 
 local Boosters = {
     ["Blue Field Booster"]  = { pos=Vector3.new(272,59,84),      collectibles=false, time=2700  },
+    ["Field Booster"]       = { pos=Vector3.new(-40, 176, -189), collectibles=false, time=2700  },
     ["Wealth Clock"]        = { pos=Vector3.new(330,50,191),     collectibles=false, time=3600  },
     ["Stockings"]           = { pos=Vector3.new(232,38,232),     collectibles=true,  time=3600  },
     ["Onett"]               = { pos=Vector3.new(34,236,-512),    collectibles=true,  time=28800 },
@@ -143,6 +144,24 @@ local knownBloomPos      = {}
 local isClaimingPlanter  = false
 local planterProgress    = {}
 local totalPlanterRewards= {}
+-- ── Chain-based auto-planter state ───────────────────────────
+-- chains[c] = { enabled=bool, slots={ {planterName, field, claimPct}, ... }, currentSlot=int, status=string }
+-- Up to 3 chains run in parallel. Each chain independently watches its own bulb.
+local planterChains     = {}   -- array of chain tables
+local planterChainsEnabled = false  -- master on/off
+-- List of valid planter names for the dropdown
+local PlanterNames = {
+    "Plastic Planter",
+    "Candy Planter",
+    "Red Clay Planter",
+    "Blue Clay Planter",
+    "Tacky Planter",
+    "Pesticide Planter",
+    "Heat-Treated Planter",
+    "Hydroponic Planter",
+    "Petal Planter",
+    "The Planter Of Plenty",
+}
 local totalPollen        = 0
 local lastPollenRaw      = LP.CoreStats.Pollen.Value
 local sessionStart       = tick()
@@ -484,146 +503,144 @@ local function createUI()
     local sg = Instance.new("ScreenGui", LP.PlayerGui)
     sg.Name = "BH_UI"; sg.ResetOnSpawn = false; sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
-    -- ── Main window ──────────────────────────────────────────
+    -- ── Main window — wide landscape (16:9 proportions) ──────
+    -- 580 × 300 fits comfortably in landscape without going off screen
+    local WIN_W, WIN_H = 580, 300
+    local TITLE_H      = 28   -- slim title bar
+    local TABBAR_H     = 26   -- tab row
+    local CONTENT_H    = WIN_H - TITLE_H - TABBAR_H  -- 246px of usable space
+
     local main = Instance.new("Frame", sg)
-    main.Size             = UDim2.new(0, 320, 0, 430)
-    main.Position         = UDim2.new(0.02, 0, 0.18, 0)
+    main.Size             = UDim2.new(0, WIN_W, 0, WIN_H)
+    main.Position         = UDim2.new(0.01, 0, 0.05, 0)
     main.BackgroundColor3 = C.bg
     main.BorderSizePixel  = 0
     main.Active           = true
     main.Draggable        = true
-    Instance.new("UICorner", main).CornerRadius = UDim.new(0, 10)
-    Instance.new("UIStroke", main).Color = C.border
+    Instance.new("UICorner", main).CornerRadius = UDim.new(0, 8)
+    local mainStroke = Instance.new("UIStroke", main)
+    mainStroke.Color = C.border; mainStroke.Thickness = 1
 
     local uiScale = Instance.new("UIScale", main)
 
     -- ── Title bar ────────────────────────────────────────────
     local titleBar = Instance.new("Frame", main)
-    titleBar.Size             = UDim2.new(1, 0, 0, 36)
+    titleBar.Size             = UDim2.new(1, 0, 0, TITLE_H)
     titleBar.BackgroundColor3 = C.panel
     titleBar.BorderSizePixel  = 0
-    Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 10)
-
-    -- Bottom mask to make corners only round on top
+    Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 8)
+    -- Square off bottom corners
     local titleMask = Instance.new("Frame", titleBar)
-    titleMask.Size             = UDim2.new(1, 0, 0.5, 0)
-    titleMask.Position         = UDim2.new(0, 0, 0.5, 0)
+    titleMask.Size             = UDim2.new(1, 0, 0.55, 0)
+    titleMask.Position         = UDim2.new(0, 0, 0.45, 0)
     titleMask.BackgroundColor3 = C.panel
     titleMask.BorderSizePixel  = 0
 
     -- Accent left strip
     local accentStrip = Instance.new("Frame", titleBar)
     accentStrip.Size             = UDim2.new(0, 3, 1, -8)
-    accentStrip.Position         = UDim2.new(0, 8, 0, 4)
+    accentStrip.Position         = UDim2.new(0, 7, 0, 4)
     accentStrip.BackgroundColor3 = C.accent
     accentStrip.BorderSizePixel  = 0
     Instance.new("UICorner", accentStrip).CornerRadius = UDim.new(1, 0)
 
     local titleLbl = Instance.new("TextLabel", titleBar)
-    titleLbl.Size                 = UDim2.new(0.65, 0, 1, 0)
-    titleLbl.Position             = UDim2.new(0, 18, 0, 0)
+    titleLbl.Size                 = UDim2.new(0, 140, 1, 0)
+    titleLbl.Position             = UDim2.new(0, 16, 0, 0)
     titleLbl.Text                 = "BLUEHIVE"
     titleLbl.TextColor3           = C.text
     titleLbl.BackgroundTransparency = 1
     titleLbl.TextXAlignment       = Enum.TextXAlignment.Left
     titleLbl.Font                 = Enum.Font.GothamBold
-    titleLbl.TextSize             = 14
+    titleLbl.TextSize             = 12
 
-    -- Version badge
     local verLbl = Instance.new("TextLabel", titleBar)
-    verLbl.Size                 = UDim2.new(0, 28, 0, 16)
-    verLbl.Position             = UDim2.new(0, 105, 0, 10)
+    verLbl.Size                 = UDim2.new(0, 24, 0, 14)
+    verLbl.Position             = UDim2.new(0, 92, 0, 7)
     verLbl.Text                 = "v2"
     verLbl.TextColor3           = C.accent
     verLbl.BackgroundColor3     = Color3.fromRGB(0, 30, 50)
     verLbl.TextXAlignment       = Enum.TextXAlignment.Center
     verLbl.Font                 = Enum.Font.GothamBold
-    verLbl.TextSize             = 10
+    verLbl.TextSize             = 9
     verLbl.BorderSizePixel      = 0
     Instance.new("UICorner", verLbl).CornerRadius = UDim.new(1, 0)
 
-    -- Destroy button
     local destroyBtn = Instance.new("TextButton", titleBar)
-    destroyBtn.Size             = UDim2.new(0, 58, 0, 22)
-    destroyBtn.Position         = UDim2.new(1, -66, 0, 7)
+    destroyBtn.Size             = UDim2.new(0, 52, 0, 18)
+    destroyBtn.Position         = UDim2.new(1, -58, 0, 5)
     destroyBtn.BackgroundColor3 = C.redDark
     destroyBtn.Text             = "✕ EXIT"
     destroyBtn.TextColor3       = Color3.fromRGB(255, 100, 100)
     destroyBtn.Font             = Enum.Font.GothamBold
-    destroyBtn.TextSize         = 11
+    destroyBtn.TextSize         = 10
     destroyBtn.BorderSizePixel  = 0
-    Instance.new("UICorner", destroyBtn).CornerRadius = UDim.new(0, 6)
+    Instance.new("UICorner", destroyBtn).CornerRadius = UDim.new(0, 5)
 
-    -- ── Tab bar (HORIZONTAL) ─────────────────────────────────
+    -- ── Tab bar ──────────────────────────────────────────────
     local tabBar = Instance.new("Frame", main)
-    tabBar.Size             = UDim2.new(1, 0, 0, 32)
-    tabBar.Position         = UDim2.new(0, 0, 0, 36)
+    tabBar.Size             = UDim2.new(1, 0, 0, TABBAR_H)
+    tabBar.Position         = UDim2.new(0, 0, 0, TITLE_H)
     tabBar.BackgroundColor3 = C.panel
     tabBar.BorderSizePixel  = 0
 
     local tabLine = Instance.new("Frame", main)
-    tabLine.Size             = UDim2.new(1, 0, 0, 2)
-    tabLine.Position         = UDim2.new(0, 0, 0, 68)
+    tabLine.Size             = UDim2.new(1, 0, 0, 1)
+    tabLine.Position         = UDim2.new(0, 0, 0, TITLE_H + TABBAR_H)
     tabLine.BackgroundColor3 = C.border
     tabLine.BorderSizePixel  = 0
 
-    -- ── Content area ────────────────────────────────────────
+    -- ── Content area ─────────────────────────────────────────
+    local contentY = TITLE_H + TABBAR_H + 1
     local content = Instance.new("Frame", main)
-    content.Size               = UDim2.new(1, 0, 1, -70)
-    content.Position           = UDim2.new(0, 0, 0, 70)
+    content.Size               = UDim2.new(1, 0, 0, CONTENT_H)
+    content.Position           = UDim2.new(0, 0, 0, contentY)
     content.BackgroundTransparency = 1
     content.ClipsDescendants   = true
 
-    -- ── Tab system ──────────────────────────────────────────
-    local tabFrames, tabBtns = {}, {}
-    local tabNames  = { "FARM", "STATS", "BOOST", "CFG" }
-    local tabIcons  = { "🌿", "📊", "⚡", "⚙" }
-    local activeIndicators = {}
+    -- ── Tab system ───────────────────────────────────────────
+    local tabFrames, tabBtns, activeIndicators = {}, {}, {}
+    local tabNames = { "FARM", "STATS", "BOOST", "PLANT", "CFG" }
+    local tabIcons = { "🌿",   "📊",    "⚡",    "🌱",    "⚙"  }
 
     local function switchTab(name)
-        for n, f in pairs(tabFrames) do
-            f.Visible = (n == name)
-        end
+        for n, f in pairs(tabFrames) do f.Visible = (n == name) end
         for n, b in pairs(tabBtns) do
-            local isActive = (n == name)
-            b.BackgroundColor3 = isActive and C.card or Color3.fromRGB(0,0,0)
-            b.BackgroundTransparency = isActive and 0 or 1
-            b.TextColor3 = isActive and C.text or C.textDim
-            if activeIndicators[n] then
-                activeIndicators[n].Visible = isActive
-            end
+            local on = (n == name)
+            b.BackgroundTransparency = on and 0 or 1
+            b.BackgroundColor3       = on and C.card or Color3.fromRGB(0,0,0)
+            b.TextColor3             = on and C.text or C.textDim
+            if activeIndicators[n] then activeIndicators[n].Visible = on end
         end
     end
 
-    local tabWidth = 1 / #tabNames
+    local tabW = 1 / #tabNames
     for i, tname in ipairs(tabNames) do
         local btn = Instance.new("TextButton", tabBar)
-        btn.Size                 = UDim2.new(tabWidth, -1, 1, -4)
-        btn.Position             = UDim2.new(tabWidth * (i-1), 0, 0, 2)
+        btn.Size                 = UDim2.new(tabW, -1, 1, -3)
+        btn.Position             = UDim2.new(tabW * (i-1), 0, 0, 1)
         btn.BackgroundColor3     = C.card
         btn.BackgroundTransparency = 1
         btn.Text                 = tabIcons[i].." "..tname
         btn.TextColor3           = C.textDim
         btn.Font                 = Enum.Font.GothamBold
-        btn.TextSize             = 11
+        btn.TextSize             = 10
         btn.BorderSizePixel      = 0
-        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
         tabBtns[tname] = btn
 
-        -- Active indicator bar at bottom of tab
         local ind = Instance.new("Frame", btn)
-        ind.Size             = UDim2.new(0.6, 0, 0, 2)
-        ind.Position         = UDim2.new(0.2, 0, 1, -3)
+        ind.Size             = UDim2.new(0.55, 0, 0, 2)
+        ind.Position         = UDim2.new(0.225, 0, 1, -2)
         ind.BackgroundColor3 = C.accent
         ind.BorderSizePixel  = 0
         ind.Visible          = false
         Instance.new("UICorner", ind).CornerRadius = UDim.new(1, 0)
         activeIndicators[tname] = ind
 
-        -- Tab content frame
         local sf = Instance.new("ScrollingFrame", content)
-        sf.Size                  = UDim2.new(1, -6, 1, -6)
-        sf.Position              = UDim2.new(0, 3, 0, 3)
+        sf.Size                  = UDim2.new(1, -4, 1, -4)
+        sf.Position              = UDim2.new(0, 2, 0, 2)
         sf.BackgroundTransparency = 1
         sf.ScrollBarThickness    = 3
         sf.ScrollBarImageColor3  = C.accentDim
@@ -632,28 +649,25 @@ local function createUI()
         sf.CanvasSize            = UDim2.new(0, 0, 0, 0)
         sf.BorderSizePixel       = 0
         local lay = Instance.new("UIListLayout", sf)
-        lay.Padding       = UDim.new(0, 5)
-        lay.SortOrder     = Enum.SortOrder.LayoutOrder
+        lay.Padding   = UDim.new(0, 4)
+        lay.SortOrder = Enum.SortOrder.LayoutOrder
         local pad = Instance.new("UIPadding", sf)
-        pad.PaddingLeft   = UDim.new(0, 4)
-        pad.PaddingRight  = UDim.new(0, 4)
-        pad.PaddingTop    = UDim.new(0, 4)
+        pad.PaddingLeft  = UDim.new(0, 4)
+        pad.PaddingRight = UDim.new(0, 4)
+        pad.PaddingTop   = UDim.new(0, 3)
         tabFrames[tname] = sf
-
         btn.MouseButton1Click:Connect(function() switchTab(tname) end)
     end
 
-    -- ── Shared element builders ──────────────────────────────
-    -- All helpers take the parent as first arg — no duplication needed
-
+    -- ── Shared element builders ───────────────────────────────
     local function mkLabel(parent, text, color, order, h)
         local l = Instance.new("TextLabel", parent)
-        l.Size                 = UDim2.new(1, 0, 0, h or 20)
+        l.Size                 = UDim2.new(1, 0, 0, h or 18)
         l.BackgroundTransparency = 1
         l.Text                 = text
         l.TextColor3           = color or C.textMid
         l.Font                 = Enum.Font.Gotham
-        l.TextSize             = 12
+        l.TextSize             = 11
         l.TextXAlignment       = Enum.TextXAlignment.Left
         l.LayoutOrder          = order or 0
         return l
@@ -661,31 +675,31 @@ local function createUI()
 
     local function mkHeader(parent, text, order)
         local l = Instance.new("TextLabel", parent)
-        l.Size                 = UDim2.new(1, 0, 0, 22)
+        l.Size                 = UDim2.new(1, 0, 0, 18)
         l.BackgroundColor3     = C.card
         l.BackgroundTransparency = 0
         l.Text                 = "  "..text
         l.TextColor3           = C.accent
         l.Font                 = Enum.Font.GothamBold
-        l.TextSize             = 11
+        l.TextSize             = 10
         l.TextXAlignment       = Enum.TextXAlignment.Left
         l.LayoutOrder          = order or 0
         l.BorderSizePixel      = 0
-        Instance.new("UICorner", l).CornerRadius = UDim.new(0, 6)
+        Instance.new("UICorner", l).CornerRadius = UDim.new(0, 5)
         return l
     end
 
     local function mkButton(parent, text, color, order, h)
         local b = Instance.new("TextButton", parent)
-        b.Size             = UDim2.new(1, 0, 0, h or 30)
+        b.Size             = UDim2.new(1, 0, 0, h or 26)
         b.BackgroundColor3 = color or C.card
         b.BorderSizePixel  = 0
         b.Text             = text
         b.TextColor3       = C.text
         b.Font             = Enum.Font.GothamBold
-        b.TextSize         = 12
+        b.TextSize         = 11
         b.LayoutOrder      = order or 0
-        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
         return b
     end
 
@@ -698,157 +712,209 @@ local function createUI()
         return d
     end
 
-    local function mkTextBox(parent, placeholder, order)
+    local function mkTextBox(parent, placeholder, order, w)
         local b = Instance.new("TextBox", parent)
-        b.Size                = UDim2.new(1, 0, 0, 28)
+        b.Size                = UDim2.new(w or 1, 0, 0, 24)
         b.BackgroundColor3    = C.card
         b.PlaceholderText     = placeholder or ""
         b.Text                = ""
         b.TextColor3          = C.text
         b.PlaceholderColor3   = C.textDim
         b.Font                = Enum.Font.Gotham
-        b.TextSize            = 12
+        b.TextSize            = 11
         b.BorderSizePixel     = 0
         b.LayoutOrder         = order or 0
-        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
         local pad = Instance.new("UIPadding", b)
-        pad.PaddingLeft = UDim.new(0, 8)
+        pad.PaddingLeft = UDim.new(0, 7)
         return b
     end
 
-    -- ── Stat card builder ────────────────────────────────────
-    local function mkStatCard(parent, order)
-        local card = Instance.new("Frame", parent)
-        card.Size             = UDim2.new(1, 0, 0, 64)
-        card.BackgroundColor3 = C.card
-        card.BorderSizePixel  = 0
-        card.LayoutOrder      = order or 0
-        Instance.new("UICorner", card).CornerRadius = UDim.new(0, 8)
-        local lay = Instance.new("UIListLayout", card)
-        lay.FillDirection = Enum.FillDirection.Vertical
-        lay.Padding       = UDim.new(0, 2)
-        local pad = Instance.new("UIPadding", card)
-        pad.PaddingLeft  = UDim.new(0, 8)
-        pad.PaddingTop   = UDim.new(0, 6)
-        pad.PaddingRight = UDim.new(0, 8)
-        return card
-    end
-
+    -- Compact stat row: label on left, value on right, inside a parent frame
     local function mkStatRow(parent, key, valColor)
         local row = Instance.new("Frame", parent)
-        row.Size                 = UDim2.new(1, 0, 0, 16)
+        row.Size                 = UDim2.new(1, 0, 0, 14)
         row.BackgroundTransparency = 1
         local kl = Instance.new("TextLabel", row)
-        kl.Size       = UDim2.new(0.38, 0, 1, 0)
+        kl.Size       = UDim2.new(0.45, 0, 1, 0)
         kl.BackgroundTransparency = 1
         kl.Text       = key
         kl.TextColor3 = C.textDim
         kl.Font       = Enum.Font.Gotham
-        kl.TextSize   = 11
+        kl.TextSize   = 10
         kl.TextXAlignment = Enum.TextXAlignment.Left
         local vl = Instance.new("TextLabel", row)
-        vl.Size       = UDim2.new(0.62, 0, 1, 0)
-        vl.Position   = UDim2.new(0.38, 0, 0, 0)
+        vl.Size       = UDim2.new(0.55, 0, 1, 0)
+        vl.Position   = UDim2.new(0.45, 0, 0, 0)
         vl.BackgroundTransparency = 1
         vl.Text       = "0"
         vl.TextColor3 = valColor or C.text
         vl.Font       = Enum.Font.GothamBold
-        vl.TextSize   = 11
+        vl.TextSize   = 10
         vl.TextXAlignment = Enum.TextXAlignment.Right
         return vl
     end
 
+    -- Stat card: compact card with list layout
+    local function mkStatCard(parent, order, h)
+        local card = Instance.new("Frame", parent)
+        card.Size             = UDim2.new(1, 0, 0, h or 60)
+        card.BackgroundColor3 = C.card
+        card.BorderSizePixel  = 0
+        card.LayoutOrder      = order or 0
+        Instance.new("UICorner", card).CornerRadius = UDim.new(0, 6)
+        local lay = Instance.new("UIListLayout", card)
+        lay.FillDirection = Enum.FillDirection.Vertical
+        lay.Padding       = UDim.new(0, 2)
+        local pad = Instance.new("UIPadding", card)
+        pad.PaddingLeft  = UDim.new(0, 7)
+        pad.PaddingTop   = UDim.new(0, 5)
+        pad.PaddingRight = UDim.new(0, 7)
+        return card
+    end
+
     -- ════════════════════════════════════════════════════════
-    -- FARM TAB
+    -- FARM TAB  (two-column layout: left = control, right = field list)
     -- ════════════════════════════════════════════════════════
     local farm = tabFrames["FARM"]
 
-    -- Start/Stop big button
-    local startBtn = mkButton(farm, "▶  START FARMING", C.greenDark, 1, 38)
-    startBtn.TextSize = 14
-    startBtn.Font     = Enum.Font.GothamBlack
+    -- We use a horizontal split frame so controls sit left and field list right
+    local farmSplit = Instance.new("Frame", farm)
+    farmSplit.Size             = UDim2.new(1, 0, 0, CONTENT_H - 12)
+    farmSplit.BackgroundTransparency = 1
+    farmSplit.BorderSizePixel  = 0
+    farmSplit.LayoutOrder      = 1
 
-    -- Status row
-    local statusCard = Instance.new("Frame", farm)
-    statusCard.Size             = UDim2.new(1, 0, 0, 36)
+    -- Left column (start btn + status)
+    local farmLeft = Instance.new("Frame", farmSplit)
+    farmLeft.Size             = UDim2.new(0.52, -4, 1, 0)
+    farmLeft.Position         = UDim2.new(0, 0, 0, 0)
+    farmLeft.BackgroundTransparency = 1
+    farmLeft.BorderSizePixel  = 0
+    local farmLeftLay = Instance.new("UIListLayout", farmLeft)
+    farmLeftLay.Padding = UDim.new(0, 4)
+    farmLeftLay.SortOrder = Enum.SortOrder.LayoutOrder
+
+    -- Right column (field selector)
+    local farmRight = Instance.new("Frame", farmSplit)
+    farmRight.Size             = UDim2.new(0.48, -2, 1, 0)
+    farmRight.Position         = UDim2.new(0.52, 4, 0, 0)
+    farmRight.BackgroundTransparency = 1
+    farmRight.BorderSizePixel  = 0
+    local farmRightLay = Instance.new("UIListLayout", farmRight)
+    farmRightLay.Padding = UDim.new(0, 3)
+    farmRightLay.SortOrder = Enum.SortOrder.LayoutOrder
+
+    -- ── Left: Start/Stop ─────────────────────────────────────
+    local startBtn = Instance.new("TextButton", farmLeft)
+    startBtn.Size             = UDim2.new(1, 0, 0, 34)
+    startBtn.BackgroundColor3 = C.greenDark
+    startBtn.BorderSizePixel  = 0
+    startBtn.Text             = "▶  START FARMING"
+    startBtn.TextColor3       = C.text
+    startBtn.Font             = Enum.Font.GothamBlack
+    startBtn.TextSize         = 13
+    startBtn.LayoutOrder      = 1
+    Instance.new("UICorner", startBtn).CornerRadius = UDim.new(0, 7)
+
+    -- Status card
+    local statusCard = Instance.new("Frame", farmLeft)
+    statusCard.Size             = UDim2.new(1, 0, 0, 30)
     statusCard.BackgroundColor3 = C.card
     statusCard.BorderSizePixel  = 0
     statusCard.LayoutOrder      = 2
-    Instance.new("UICorner", statusCard).CornerRadius = UDim.new(0, 8)
+    Instance.new("UICorner", statusCard).CornerRadius = UDim.new(0, 7)
 
     local statusDot = Instance.new("Frame", statusCard)
-    statusDot.Size             = UDim2.new(0, 8, 0, 8)
-    statusDot.Position         = UDim2.new(0, 10, 0.5, -4)
+    statusDot.Size             = UDim2.new(0, 7, 0, 7)
+    statusDot.Position         = UDim2.new(0, 8, 0.5, -3)
     statusDot.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
     statusDot.BorderSizePixel  = 0
     Instance.new("UICorner", statusDot).CornerRadius = UDim.new(1, 0)
 
     local statusLbl = Instance.new("TextLabel", statusCard)
-    statusLbl.Size                 = UDim2.new(0.55, 0, 1, 0)
-    statusLbl.Position             = UDim2.new(0, 26, 0, 0)
+    statusLbl.Size                 = UDim2.new(0.5, 0, 1, 0)
+    statusLbl.Position             = UDim2.new(0, 22, 0, 0)
     statusLbl.BackgroundTransparency = 1
     statusLbl.Text                 = "Idle"
     statusLbl.TextColor3           = C.textMid
     statusLbl.Font                 = Enum.Font.GothamBold
-    statusLbl.TextSize             = 12
+    statusLbl.TextSize             = 11
     statusLbl.TextXAlignment       = Enum.TextXAlignment.Left
 
     local fieldActiveLbl = Instance.new("TextLabel", statusCard)
-    fieldActiveLbl.Size                 = UDim2.new(0.45, -10, 1, 0)
-    fieldActiveLbl.Position             = UDim2.new(0.55, 0, 0, 0)
+    fieldActiveLbl.Size                 = UDim2.new(0.48, -6, 1, 0)
+    fieldActiveLbl.Position             = UDim2.new(0.52, 0, 0, 0)
     fieldActiveLbl.BackgroundTransparency = 1
     fieldActiveLbl.Text                 = currentField
     fieldActiveLbl.TextColor3           = C.accent
     fieldActiveLbl.Font                 = Enum.Font.Gotham
-    fieldActiveLbl.TextSize             = 10
+    fieldActiveLbl.TextSize             = 9
     fieldActiveLbl.TextXAlignment       = Enum.TextXAlignment.Right
     local fPad = Instance.new("UIPadding", fieldActiveLbl)
-    fPad.PaddingRight = UDim.new(0, 8)
+    fPad.PaddingRight = UDim.new(0, 6)
 
-    -- Field selector
-    mkHeader(farm, "SELECT FIELD", 3)
+    -- Honey/Pollen quick stats on left
+    local quickStats = Instance.new("Frame", farmLeft)
+    quickStats.Size             = UDim2.new(1, 0, 0, 80)
+    quickStats.BackgroundColor3 = C.card
+    quickStats.BorderSizePixel  = 0
+    quickStats.LayoutOrder      = 3
+    Instance.new("UICorner", quickStats).CornerRadius = UDim.new(0, 7)
+    local qsLay = Instance.new("UIListLayout", quickStats)
+    qsLay.Padding   = UDim.new(0, 2)
+    qsLay.SortOrder = Enum.SortOrder.LayoutOrder
+    local qsPad = Instance.new("UIPadding", quickStats)
+    qsPad.PaddingLeft = UDim.new(0, 8); qsPad.PaddingTop = UDim.new(0, 5); qsPad.PaddingRight = UDim.new(0, 8)
 
-    local fieldScroll = Instance.new("ScrollingFrame", farm)
-    fieldScroll.Size                  = UDim2.new(1, 0, 0, 120)
+    local qhS  = mkStatRow(quickStats, "H/s",    C.honey)
+    local qhH  = mkStatRow(quickStats, "H/hour",  C.honey)
+    local qpS  = mkStatRow(quickStats, "P/s",    C.pollen)
+    local qtot = mkStatRow(quickStats, "Total",   C.honey)
+    local qtim = mkStatRow(quickStats, "Runtime", C.textMid)
+
+    -- ── Right: Field selector ────────────────────────────────
+    local fHdr = mkHeader(farmRight, "FIELD", 1)
+
+    local fieldScroll = Instance.new("ScrollingFrame", farmRight)
+    fieldScroll.Size                  = UDim2.new(1, 0, 0, CONTENT_H - 30)
     fieldScroll.BackgroundColor3      = C.card
     fieldScroll.BorderSizePixel       = 0
     fieldScroll.ScrollBarThickness    = 3
     fieldScroll.ScrollBarImageColor3  = C.accentDim
     fieldScroll.AutomaticCanvasSize   = Enum.AutomaticSize.Y
     fieldScroll.CanvasSize            = UDim2.new(0, 0, 0, 0)
-    fieldScroll.LayoutOrder           = 4
-    Instance.new("UICorner", fieldScroll).CornerRadius = UDim.new(0, 8)
+    fieldScroll.LayoutOrder           = 2
+    Instance.new("UICorner", fieldScroll).CornerRadius = UDim.new(0, 6)
     local fsLay = Instance.new("UIListLayout", fieldScroll)
     fsLay.Padding = UDim.new(0, 1)
     local fsPad = Instance.new("UIPadding", fieldScroll)
-    fsPad.PaddingLeft   = UDim.new(0, 4)
-    fsPad.PaddingRight  = UDim.new(0, 4)
-    fsPad.PaddingTop    = UDim.new(0, 4)
-    fsPad.PaddingBottom = UDim.new(0, 4)
+    fsPad.PaddingLeft = UDim.new(0, 3); fsPad.PaddingRight = UDim.new(0, 3)
+    fsPad.PaddingTop  = UDim.new(0, 3); fsPad.PaddingBottom = UDim.new(0, 3)
 
     local fieldBtns = {}
     local function updateFieldBtns()
         for fname, fb in pairs(fieldBtns) do
-            local isSelected = (fname == currentField)
-            fb.BackgroundColor3 = isSelected and Color3.fromRGB(0, 50, 30) or Color3.fromRGB(0,0,0)
-            fb.BackgroundTransparency = isSelected and 0 or 1
-            fb.TextColor3 = isSelected and C.green or C.textMid
+            local sel = (fname == currentField)
+            fb.BackgroundColor3       = sel and Color3.fromRGB(0, 50, 30) or Color3.fromRGB(0,0,0)
+            fb.BackgroundTransparency = sel and 0 or 1
+            fb.TextColor3             = sel and C.green or C.textMid
         end
     end
     for _, fname in ipairs(FieldOrder) do
         local fb = Instance.new("TextButton", fieldScroll)
-        fb.Size                  = UDim2.new(1, 0, 0, 22)
-        fb.BackgroundColor3      = Color3.fromRGB(0, 50, 30)
+        fb.Size                   = UDim2.new(1, 0, 0, 20)
+        fb.BackgroundColor3       = Color3.fromRGB(0, 50, 30)
         fb.BackgroundTransparency = 1
-        fb.BorderSizePixel       = 0
-        fb.Text                  = fname
-        fb.TextColor3            = C.textMid
-        fb.Font                  = Enum.Font.Gotham
-        fb.TextSize              = 11
-        fb.TextXAlignment        = Enum.TextXAlignment.Left
-        Instance.new("UICorner", fb).CornerRadius = UDim.new(0, 5)
+        fb.BorderSizePixel        = 0
+        fb.Text                   = fname
+        fb.TextColor3             = C.textMid
+        fb.Font                   = Enum.Font.Gotham
+        fb.TextSize               = 10
+        fb.TextXAlignment         = Enum.TextXAlignment.Left
+        Instance.new("UICorner", fb).CornerRadius = UDim.new(0, 4)
         local fbPad = Instance.new("UIPadding", fb)
-        fbPad.PaddingLeft = UDim.new(0, 8)
+        fbPad.PaddingLeft = UDim.new(0, 6)
         fieldBtns[fname] = fb
         fb.MouseButton1Click:Connect(function()
             currentField   = fname
@@ -860,129 +926,516 @@ local function createUI()
     updateFieldBtns()
 
     -- ════════════════════════════════════════════════════════
-    -- STATS TAB
+    -- STATS TAB  (two-column: honey+pollen left, session+rewards right)
     -- ════════════════════════════════════════════════════════
     local statsTab = tabFrames["STATS"]
 
+    local statsSplit = Instance.new("Frame", statsTab)
+    statsSplit.Size             = UDim2.new(1, 0, 0, CONTENT_H - 10)
+    statsSplit.BackgroundTransparency = 1
+    statsSplit.BorderSizePixel  = 0
+    statsSplit.LayoutOrder      = 1
+
+    local statsLeft = Instance.new("Frame", statsSplit)
+    statsLeft.Size             = UDim2.new(0.48, -3, 1, 0)
+    statsLeft.BackgroundTransparency = 1
+    statsLeft.BorderSizePixel  = 0
+    local slLay = Instance.new("UIListLayout", statsLeft)
+    slLay.Padding = UDim.new(0, 4); slLay.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local statsRight = Instance.new("Frame", statsSplit)
+    statsRight.Size             = UDim2.new(0.52, -1, 1, 0)
+    statsRight.Position         = UDim2.new(0.48, 4, 0, 0)
+    statsRight.BackgroundTransparency = 1
+    statsRight.BorderSizePixel  = 0
+    local srLay = Instance.new("UIListLayout", statsRight)
+    srLay.Padding = UDim.new(0, 4); srLay.SortOrder = Enum.SortOrder.LayoutOrder
+
     -- Interval toggle
-    local toggleBtn = mkButton(statsTab, "📅  View: Session Total", C.accentDim, 1, 28)
-    toggleBtn.TextSize = 11
+    local toggleBtn = mkButton(statsLeft, "📅 Session Total", C.accentDim, 1, 22)
+    toggleBtn.TextSize = 10
 
-    mkDivider(statsTab, 2)
-
-    -- Honey stats card
-    local hCard = mkStatCard(statsTab, 3)
+    -- Honey card
+    local hCard = mkStatCard(statsLeft, 2, 62)
     mkHeader(hCard, "🍯 HONEY", 0)
-    local hS = mkStatRow(hCard, "Per second",  C.honey)
-    local hM = mkStatRow(hCard, "Per minute",  C.honey)
-    local hH = mkStatRow(hCard, "Per hour",    C.honey)
+    local hS = mkStatRow(hCard, "Per second", C.honey)
+    local hM = mkStatRow(hCard, "Per minute", C.honey)
+    local hH = mkStatRow(hCard, "Per hour",   C.honey)
 
-    -- Pollen stats card
-    local pCard = mkStatCard(statsTab, 4)
+    -- Pollen card
+    local pCard = mkStatCard(statsLeft, 3, 62)
     mkHeader(pCard, "🌸 POLLEN", 0)
-    local pS = mkStatRow(pCard, "Per second",  C.pollen)
-    local pM = mkStatRow(pCard, "Per minute",  C.pollen)
-    local pH = mkStatRow(pCard, "Per hour",    C.pollen)
+    local pS = mkStatRow(pCard, "Per second", C.pollen)
+    local pM = mkStatRow(pCard, "Per minute", C.pollen)
+    local pH = mkStatRow(pCard, "Per hour",   C.pollen)
 
-    -- Session card
-    local sessCard = mkStatCard(statsTab, 5)
-    sessCard.Size = UDim2.new(1, 0, 0, 46)
+    -- Session card (right col)
+    local sessCard = mkStatCard(statsRight, 1, 42)
     mkHeader(sessCard, "SESSION", 0)
-    local totLbl  = mkStatRow(sessCard, "Total honey",  C.honey)
-    local timeLbl = mkStatRow(sessCard, "Runtime",      C.textMid)
+    local totLbl  = mkStatRow(sessCard, "Total honey", C.honey)
+    local timeLbl = mkStatRow(sessCard, "Runtime",     C.textMid)
 
-    mkDivider(statsTab, 6)
-    mkHeader(statsTab, "🎰 MEMORY MATCH REWARDS", 7)
-    local mmLbl = mkLabel(statsTab, "  No rewards yet.", C.textDim, 8, 20)
-    mmLbl.TextWrapped = true; mmLbl.TextYAlignment = Enum.TextYAlignment.Top
+    -- MM rewards (right)
+    mkHeader(statsRight, "🎰 MM REWARDS", 2)
+    local mmLbl = mkLabel(statsRight, "  None yet.", C.textDim, 3, 14)
+    mmLbl.TextWrapped = true
 
-    mkDivider(statsTab, 9)
-    mkHeader(statsTab, "🌱 PLANTERS", 10)
-    local planterProgressLbl = mkLabel(statsTab, "  No planters found.", C.textDim, 11, 20)
-    planterProgressLbl.TextWrapped = true; planterProgressLbl.TextYAlignment = Enum.TextYAlignment.Top
+    mkDivider(statsRight, 4)
+    mkHeader(statsRight, "🌱 PLANTERS", 5)
+    local planterProgressLbl = mkLabel(statsRight, "  No planters.", C.textDim, 6, 14)
+    planterProgressLbl.TextWrapped = true
 
-    mkDivider(statsTab, 12)
-    mkHeader(statsTab, "🎁 PLANTER REWARDS", 13)
-    local planterRewardsLbl = mkLabel(statsTab, "  No rewards yet.", C.textDim, 14, 20)
-    planterRewardsLbl.TextWrapped = true; planterRewardsLbl.TextYAlignment = Enum.TextYAlignment.Top
+    mkDivider(statsRight, 7)
+    mkHeader(statsRight, "🎁 PLANTER REWARDS", 8)
+    local planterRewardsLbl = mkLabel(statsRight, "  None yet.", C.textDim, 9, 14)
+    planterRewardsLbl.TextWrapped = true
 
     toggleBtn.MouseButton1Click:Connect(function()
         showInterval = not showInterval
-        toggleBtn.Text = showInterval and "📅  View: Since Last Start" or "📅  View: Session Total"
+        toggleBtn.Text = showInterval and "📅 Since Last Start" or "📅 Session Total"
         intervalStart  = tick()
         intervalHoney  = LP.CoreStats.Honey.Value
     end)
 
-    -- Store UI refs
-    UI = {
-        hS=hS, hM=hM, hH=hH,
-        pS=pS, pM=pM, pH=pH,
-        total=totLbl, time=timeLbl,
-        mm=mmLbl,
-        status=statusLbl, statusDot=statusDot,
-        fieldLbl=fieldActiveLbl,
-        planterProgress=planterProgressLbl,
-        planterRewards=planterRewardsLbl,
-    }
-
     -- ════════════════════════════════════════════════════════
-    -- BOOST TAB
+    -- BOOST TAB  (two-column grid of booster rows)
     -- ════════════════════════════════════════════════════════
     local boostTab = tabFrames["BOOST"]
-    mkHeader(boostTab, "BOOSTER STATUS", 1)
+
+    local boostGrid = Instance.new("Frame", boostTab)
+    boostGrid.Size             = UDim2.new(1, 0, 0, CONTENT_H - 10)
+    boostGrid.BackgroundTransparency = 1
+    boostGrid.BorderSizePixel  = 0
+    boostGrid.LayoutOrder      = 1
+
+    local bLeft = Instance.new("Frame", boostGrid)
+    bLeft.Size             = UDim2.new(0.5, -3, 1, 0)
+    bLeft.BackgroundTransparency = 1
+    bLeft.BorderSizePixel  = 0
+    local blLay = Instance.new("UIListLayout", bLeft)
+    blLay.Padding = UDim.new(0, 3); blLay.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local bRight = Instance.new("Frame", boostGrid)
+    bRight.Size             = UDim2.new(0.5, -1, 1, 0)
+    bRight.Position         = UDim2.new(0.5, 4, 0, 0)
+    bRight.BackgroundTransparency = 1
+    bRight.BorderSizePixel  = 0
+    local brLay = Instance.new("UIListLayout", bRight)
+    brLay.Padding = UDim.new(0, 3); brLay.SortOrder = Enum.SortOrder.LayoutOrder
 
     for i, bName in ipairs(BoosterOrder) do
-        local row = Instance.new("Frame", boostTab)
-        row.Size             = UDim2.new(1, 0, 0, 28)
+        local col = (i <= math.ceil(#BoosterOrder / 2)) and bLeft or bRight
+        local row = Instance.new("Frame", col)
+        row.Size             = UDim2.new(1, 0, 0, 26)
         row.BackgroundColor3 = C.card
         row.BorderSizePixel  = 0
-        row.LayoutOrder      = i + 1
-        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 7)
-
+        row.LayoutOrder      = i
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
         local lbl = Instance.new("TextLabel", row)
-        lbl.Size                 = UDim2.new(1, -8, 1, 0)
-        lbl.Position             = UDim2.new(0, 8, 0, 0)
+        lbl.Size                 = UDim2.new(1, -6, 1, 0)
+        lbl.Position             = UDim2.new(0, 6, 0, 0)
         lbl.BackgroundTransparency = 1
-        lbl.Text                 = "  ? "..bName..":  Unknown"
+        lbl.Text                 = "  ? "..bName
         lbl.TextColor3           = C.textDim
         lbl.Font                 = Enum.Font.Gotham
-        lbl.TextSize             = 11
+        lbl.TextSize             = 10
         lbl.TextXAlignment       = Enum.TextXAlignment.Left
+        lbl.TextTruncate         = Enum.TextTruncate.AtEnd
         boosterLabels[bName]     = lbl
     end
+
+    -- ════════════════════════════════════════════════════════
+    -- PLANT TAB  — chain-based cycle planter
+    -- ════════════════════════════════════════════════════════
+    local plantTab = tabFrames["PLANT"]
+
+    -- ── Master toggle + chain scroll ─────────────────────────
+    local masterToggleBtn = mkButton(plantTab, "🌱 Auto-Plant: OFF", C.card, 1, 22)
+    masterToggleBtn.TextSize = 11
+
+    -- Outer scroll holds all chains
+    local chainOuterScroll = Instance.new("ScrollingFrame", plantTab)
+    chainOuterScroll.Size                  = UDim2.new(1, 0, 0, CONTENT_H - 32)
+    chainOuterScroll.BackgroundTransparency = 1
+    chainOuterScroll.BorderSizePixel       = 0
+    chainOuterScroll.ScrollBarThickness    = 3
+    chainOuterScroll.ScrollBarImageColor3  = C.accentDim
+    chainOuterScroll.AutomaticCanvasSize   = Enum.AutomaticSize.Y
+    chainOuterScroll.CanvasSize            = UDim2.new(0, 0, 0, 0)
+    chainOuterScroll.LayoutOrder           = 2
+    local chainOuterLay = Instance.new("UIListLayout", chainOuterScroll)
+    chainOuterLay.Padding   = UDim.new(0, 6)
+    chainOuterLay.SortOrder = Enum.SortOrder.LayoutOrder
+    local chainOuterPad = Instance.new("UIPadding", chainOuterScroll)
+    chainOuterPad.PaddingLeft = UDim.new(0, 2); chainOuterPad.PaddingRight  = UDim.new(0, 4)
+    chainOuterPad.PaddingTop  = UDim.new(0, 3); chainOuterPad.PaddingBottom = UDim.new(0, 4)
+
+    -- ── Helper: build a cycling dropdown button ───────────────
+    -- values = table of strings, returns { frame, getValue }
+    local function mkCycleBtn(parent, values, order, w)
+        local idx = 1
+        local btn = Instance.new("TextButton", parent)
+        btn.Size             = UDim2.new(w or 1, 0, 0, 20)
+        btn.BackgroundColor3 = C.card
+        btn.BorderSizePixel  = 0
+        btn.Text             = values[idx]
+        btn.TextColor3       = C.accent
+        btn.Font             = Enum.Font.Gotham
+        btn.TextSize         = 9
+        btn.LayoutOrder      = order or 0
+        btn.TextTruncate     = Enum.TextTruncate.AtEnd
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+        local lPad = Instance.new("UIPadding", btn)
+        lPad.PaddingLeft = UDim.new(0, 4); lPad.PaddingRight = UDim.new(0, 4)
+        btn.MouseButton1Click:Connect(function()
+            idx = (idx % #values) + 1
+            btn.Text = values[idx]
+        end)
+        return btn, function() return values[idx] end, function(v)
+            for i, val in ipairs(values) do
+                if val == v then idx = i; btn.Text = val; return end
+            end
+        end
+    end
+
+    -- ── Chain UI builder ─────────────────────────────────────
+    local chainFrameRefs = {}   -- [chainIdx] = outer frame
+    local chainUIRefs    = {}   -- [chainIdx] = { slotFrames={}, statusLbl, slotScrollFrame }
+
+    local function rebuildChainUI()
+        -- destroy all existing chain frames
+        for _, f in ipairs(chainFrameRefs) do f:Destroy() end
+        chainFrameRefs = {}
+        chainUIRefs    = {}
+
+        for ci, chain in ipairs(planterChains) do
+            -- ── Chain card ────────────────────────────────────
+            local chainCard = Instance.new("Frame", chainOuterScroll)
+            chainCard.BackgroundColor3 = C.card
+            chainCard.BorderSizePixel  = 0
+            chainCard.LayoutOrder      = ci
+            chainCard.AutomaticSize    = Enum.AutomaticSize.Y
+            Instance.new("UICorner", chainCard).CornerRadius = UDim.new(0, 7)
+            local cardStroke = Instance.new("UIStroke", chainCard)
+            cardStroke.Color     = chain.enabled and C.accent or C.border
+            cardStroke.Thickness = 1
+            local cardLay = Instance.new("UIListLayout", chainCard)
+            cardLay.Padding   = UDim.new(0, 3)
+            cardLay.SortOrder = Enum.SortOrder.LayoutOrder
+            local cardPad = Instance.new("UIPadding", chainCard)
+            cardPad.PaddingLeft   = UDim.new(0, 5); cardPad.PaddingRight  = UDim.new(0, 5)
+            cardPad.PaddingTop    = UDim.new(0, 5); cardPad.PaddingBottom = UDim.new(0, 5)
+
+            -- Chain header row
+            local hdrRow = Instance.new("Frame", chainCard)
+            hdrRow.Size             = UDim2.new(1, 0, 0, 20)
+            hdrRow.BackgroundTransparency = 1
+            hdrRow.LayoutOrder      = 1
+
+            local chainLbl = Instance.new("TextLabel", hdrRow)
+            chainLbl.Size                 = UDim2.new(0, 60, 1, 0)
+            chainLbl.BackgroundTransparency = 1
+            chainLbl.Text                 = "Cycle #"..ci
+            chainLbl.TextColor3           = chain.enabled and C.accent or C.textDim
+            chainLbl.Font                 = Enum.Font.GothamBold
+            chainLbl.TextSize             = 11
+            chainLbl.TextXAlignment       = Enum.TextXAlignment.Left
+
+            -- Status label (centre)
+            local chainStatusLbl = Instance.new("TextLabel", hdrRow)
+            chainStatusLbl.Size                 = UDim2.new(1, -160, 1, 0)
+            chainStatusLbl.Position             = UDim2.new(0, 62, 0, 0)
+            chainStatusLbl.BackgroundTransparency = 1
+            chainStatusLbl.Text                 = chain.status or "—"
+            chainStatusLbl.TextColor3           = C.textDim
+            chainStatusLbl.Font                 = Enum.Font.Gotham
+            chainStatusLbl.TextSize             = 9
+            chainStatusLbl.TextXAlignment       = Enum.TextXAlignment.Left
+            chainStatusLbl.TextTruncate         = Enum.TextTruncate.AtEnd
+
+            -- Enable toggle
+            local enBtn = Instance.new("TextButton", hdrRow)
+            enBtn.Size             = UDim2.new(0, 36, 0, 16)
+            enBtn.Position         = UDim2.new(1, -78, 0.5, -8)
+            enBtn.BackgroundColor3 = chain.enabled and C.greenDark or C.redDark
+            enBtn.BorderSizePixel  = 0
+            enBtn.Text             = chain.enabled and "ON" or "OFF"
+            enBtn.TextColor3       = chain.enabled and C.green or Color3.fromRGB(255,100,100)
+            enBtn.Font             = Enum.Font.GothamBold
+            enBtn.TextSize         = 9
+            Instance.new("UICorner", enBtn).CornerRadius = UDim.new(0, 4)
+            local capturedChainId = chain.id
+            enBtn.MouseButton1Click:Connect(function()
+                local _, ch = findChainById(capturedChainId)
+                if ch then ch.enabled = not ch.enabled end
+                rebuildChainUI()
+            end)
+
+            -- Add slot button
+            local addSlotBtn = Instance.new("TextButton", hdrRow)
+            addSlotBtn.Size             = UDim2.new(0, 18, 0, 16)
+            addSlotBtn.Position         = UDim2.new(1, -38, 0.5, -8)
+            addSlotBtn.BackgroundColor3 = Color3.fromRGB(0, 60, 30)
+            addSlotBtn.BorderSizePixel  = 0
+            addSlotBtn.Text             = "+"
+            addSlotBtn.TextColor3       = C.green
+            addSlotBtn.Font             = Enum.Font.GothamBold
+            addSlotBtn.TextSize         = 12
+            Instance.new("UICorner", addSlotBtn).CornerRadius = UDim.new(0, 4)
+            addSlotBtn.MouseButton1Click:Connect(function()
+                -- find by id so index doesn't matter
+                local _, ch = findChainById(chain.id)
+                if ch then
+                    table.insert(ch.slots, {
+                        planterName = PlanterNames[1],
+                        field       = FieldOrder[1],
+                        claimPct    = 100,
+                    })
+                end
+                rebuildChainUI()
+            end)
+
+            -- Remove chain button
+            local remChainBtn = Instance.new("TextButton", hdrRow)
+            remChainBtn.Size             = UDim2.new(0, 16, 0, 16)
+            remChainBtn.Position         = UDim2.new(1, -17, 0.5, -8)
+            remChainBtn.BackgroundTransparency = 1
+            remChainBtn.BorderSizePixel  = 0
+            remChainBtn.Text             = "✕"
+            remChainBtn.TextColor3       = C.textDim
+            remChainBtn.Font             = Enum.Font.GothamBold
+            remChainBtn.TextSize         = 10
+            remChainBtn.MouseButton1Click:Connect(function()
+                local rci = nil
+                for idx, ch in ipairs(planterChains) do
+                    if ch.id == capturedChainId then rci = idx; break end
+                end
+                if rci then
+                    -- Clear any queued actions for this chain
+                    for qi = #planterActionQueue, 1, -1 do
+                        if planterActionQueue[qi].chainId == capturedChainId then
+                            table.remove(planterActionQueue, qi)
+                        end
+                    end
+                    table.remove(planterChains, rci)
+                end
+                rebuildChainUI()
+            end)
+
+            -- ── Column headers ────────────────────────────────
+            local colHdr = Instance.new("Frame", chainCard)
+            colHdr.Size             = UDim2.new(1, 0, 0, 14)
+            colHdr.BackgroundTransparency = 1
+            colHdr.LayoutOrder      = 2
+            local function colLbl(txt, xPos, w)
+                local l = Instance.new("TextLabel", colHdr)
+                l.Size                 = UDim2.new(w, 0, 1, 0)
+                l.Position             = UDim2.new(xPos, 0, 0, 0)
+                l.BackgroundTransparency = 1
+                l.Text                 = txt
+                l.TextColor3           = C.textDim
+                l.Font                 = Enum.Font.GothamBold
+                l.TextSize             = 8
+                l.TextXAlignment       = Enum.TextXAlignment.Left
+            end
+            colLbl("PLANTER",   0,     0.38)
+            colLbl("FIELD",     0.38,  0.37)
+            colLbl("%",         0.75,  0.12)
+            colLbl("",          0.87,  0.13)  -- actions col
+
+            -- ── Slot rows ─────────────────────────────────────
+            local slotRefs = {}
+            for si, slot in ipairs(chain.slots) do
+                local isCurrentSlot = planterChainsEnabled and chain.enabled and (si == chain.currentSlot)
+
+                local slotRow = Instance.new("Frame", chainCard)
+                slotRow.Size             = UDim2.new(1, 0, 0, 22)
+                slotRow.BackgroundColor3 = isCurrentSlot and Color3.fromRGB(0, 45, 25) or Color3.fromRGB(0,0,0)
+                slotRow.BackgroundTransparency = isCurrentSlot and 0 or 1
+                slotRow.BorderSizePixel  = 0
+                slotRow.LayoutOrder      = si + 2
+                Instance.new("UICorner", slotRow).CornerRadius = UDim.new(0, 4)
+
+                -- slot index
+                local siLbl = Instance.new("TextLabel", slotRow)
+                siLbl.Size                 = UDim2.new(0, 10, 1, 0)
+                siLbl.Position             = UDim2.new(0, 0, 0, 0)
+                siLbl.BackgroundTransparency = 1
+                siLbl.Text                 = tostring(si)
+                siLbl.TextColor3           = isCurrentSlot and C.green or C.textDim
+                siLbl.Font                 = Enum.Font.GothamBold
+                siLbl.TextSize             = 8
+                siLbl.TextXAlignment       = Enum.TextXAlignment.Center
+
+                -- planter dropdown
+                local capturedSi = si
+                local capturedChainId2 = chain.id
+                local pBtn, getPName, setPName = mkCycleBtn(slotRow, PlanterNames, si*10)
+                pBtn.Size     = UDim2.new(0.36, -2, 1, -2)
+                pBtn.Position = UDim2.new(0, 12, 0, 1)
+                setPName(slot.planterName)
+                pBtn.MouseButton1Click:Connect(function()
+                    local _, ch = findChainById(capturedChainId2)
+                    if ch and ch.slots[capturedSi] then
+                        ch.slots[capturedSi].planterName = getPName()
+                    end
+                end)
+
+                -- field dropdown
+                local fBtn, getFName, setFName = mkCycleBtn(slotRow, FieldOrder, si*10+1)
+                fBtn.Size     = UDim2.new(0.37, -2, 1, -2)
+                fBtn.Position = UDim2.new(0.38, 0, 0, 1)
+                setFName(slot.field)
+                fBtn.MouseButton1Click:Connect(function()
+                    local _, ch = findChainById(capturedChainId2)
+                    if ch and ch.slots[capturedSi] then
+                        ch.slots[capturedSi].field = getFName()
+                    end
+                end)
+
+                -- % box
+                local pctBox = Instance.new("TextBox", slotRow)
+                pctBox.Size             = UDim2.new(0.12, -2, 1, -2)
+                pctBox.Position         = UDim2.new(0.75, 0, 0, 1)
+                pctBox.BackgroundColor3 = C.bg
+                pctBox.Text             = tostring(slot.claimPct)
+                pctBox.TextColor3       = C.honey
+                pctBox.Font             = Enum.Font.GothamBold
+                pctBox.TextSize         = 9
+                pctBox.BorderSizePixel  = 0
+                Instance.new("UICorner", pctBox).CornerRadius = UDim.new(0, 3)
+                local pctPad = Instance.new("UIPadding", pctBox)
+                pctPad.PaddingLeft = UDim.new(0, 3)
+                pctBox.FocusLost:Connect(function()
+                    local v = tonumber(pctBox.Text:match("[%d%.]+")) or 100
+                    v = math.clamp(v, 1, 100)
+                    local _, ch = findChainById(capturedChainId2)
+                    if ch and ch.slots[capturedSi] then
+                        ch.slots[capturedSi].claimPct = v
+                    end
+                    pctBox.Text = tostring(v)
+                end)
+
+                -- remove slot button
+                local delSlotBtn = Instance.new("TextButton", slotRow)
+                delSlotBtn.Size             = UDim2.new(0.12, 0, 1, -2)
+                delSlotBtn.Position         = UDim2.new(0.88, 0, 0, 1)
+                delSlotBtn.BackgroundTransparency = 1
+                delSlotBtn.BorderSizePixel  = 0
+                delSlotBtn.Text             = "✕"
+                delSlotBtn.TextColor3       = C.textDim
+                delSlotBtn.Font             = Enum.Font.GothamBold
+                delSlotBtn.TextSize         = 9
+                delSlotBtn.MouseButton1Click:Connect(function()
+                    local _, ch = findChainById(capturedChainId2)
+                    if not ch or #ch.slots <= 1 then return end
+                    table.remove(ch.slots, capturedSi)
+                    if ch.currentSlot > #ch.slots then ch.currentSlot = 1 end
+                    rebuildChainUI()
+                end)
+
+                table.insert(slotRefs, slotRow)
+            end
+
+            table.insert(chainFrameRefs, chainCard)
+            chainUIRefs[ci] = { statusLbl = chainStatusLbl, slotRefs = slotRefs }
+        end
+
+        -- "Add Chain" button at the bottom
+        if #planterChains < 6 then
+            local addChainBtn = Instance.new("TextButton", chainOuterScroll)
+            addChainBtn.Size             = UDim2.new(1, 0, 0, 22)
+            addChainBtn.BackgroundColor3 = Color3.fromRGB(0, 40, 20)
+            addChainBtn.BorderSizePixel  = 0
+            addChainBtn.Text             = "+ Add Cycle"
+            addChainBtn.TextColor3       = C.green
+            addChainBtn.Font             = Enum.Font.GothamBold
+            addChainBtn.TextSize         = 11
+            addChainBtn.LayoutOrder      = #planterChains + 99
+            Instance.new("UICorner", addChainBtn).CornerRadius = UDim.new(0, 6)
+            addChainBtn.MouseButton1Click:Connect(function()
+                table.insert(planterChains, {
+                    id          = newChainId(),
+                    enabled     = false,
+                    slots       = {{ planterName=PlanterNames[1], field=FieldOrder[1], claimPct=100 }},
+                    currentSlot = 1,
+                    status      = "—",
+                })
+                rebuildChainUI()
+            end)
+            table.insert(chainFrameRefs, addChainBtn)
+        end
+    end
+
+    -- Master toggle logic
+    masterToggleBtn.MouseButton1Click:Connect(function()
+        planterChainsEnabled = not planterChainsEnabled
+        masterToggleBtn.Text             = planterChainsEnabled and "🌱 Auto-Plant: ON" or "🌱 Auto-Plant: OFF"
+        masterToggleBtn.BackgroundColor3 = planterChainsEnabled and C.greenDark or C.card
+        masterToggleBtn.TextColor3       = planterChainsEnabled and C.green or C.text
+        rebuildChainUI()
+    end)
+
+    -- Expose to task
+    UI.rebuildChainUI = rebuildChainUI
+    UI.chainUIRefs    = chainUIRefs
+
+    -- Start empty — user adds cycles manually
+    rebuildChainUI()
 
     -- ════════════════════════════════════════════════════════
     -- CFG TAB
     -- ════════════════════════════════════════════════════════
     local cfgTab = tabFrames["CFG"]
 
-    mkHeader(cfgTab, "🎈 BALLOON", 1)
-    local balloonForeverBtn = mkButton(cfgTab, "Ignore Balloon: OFF  (claim it)", C.greenDark, 2, 28)
-    balloonForeverBtn.TextSize = 11
-    mkLabel(cfgTab, "Timed ignore (e.g. 30m, 2h):", C.textDim, 3)
-    local balloonTimeBox  = mkTextBox(cfgTab, "e.g. 30m, 2h ...", 4)
-    local balloonStatusLbl = mkLabel(cfgTab, "  Timed ignore: inactive", Color3.fromRGB(100, 150, 100), 5)
+    local cfgSplit = Instance.new("Frame", cfgTab)
+    cfgSplit.Size             = UDim2.new(1, 0, 0, CONTENT_H - 10)
+    cfgSplit.BackgroundTransparency = 1
+    cfgSplit.BorderSizePixel  = 0
+    cfgSplit.LayoutOrder      = 1
 
-    mkDivider(cfgTab, 6)
-    mkHeader(cfgTab, "🌺 BLOOMS & PETALS", 7)
-    local bloomBtn = mkButton(cfgTab, "Collect Blooms & Petals: ON", C.greenDark, 8, 28)
-    bloomBtn.TextSize = 11
+    local cfgLeft = Instance.new("Frame", cfgSplit)
+    cfgLeft.Size             = UDim2.new(0.5, -4, 1, 0)
+    cfgLeft.BackgroundTransparency = 1
+    cfgLeft.BorderSizePixel  = 0
+    local cfgLLay = Instance.new("UIListLayout", cfgLeft)
+    cfgLLay.Padding = UDim.new(0, 4); cfgLLay.SortOrder = Enum.SortOrder.LayoutOrder
 
-    mkDivider(cfgTab, 9)
-    mkHeader(cfgTab, "🔍 UI SCALE", 10)
-    local scaleBox = mkTextBox(cfgTab, "Scale 0.4–2.5 (default 1.0)", 11)
+    local cfgRight = Instance.new("Frame", cfgSplit)
+    cfgRight.Size             = UDim2.new(0.5, -2, 1, 0)
+    cfgRight.Position         = UDim2.new(0.5, 6, 0, 0)
+    cfgRight.BackgroundTransparency = 1
+    cfgRight.BorderSizePixel  = 0
+    local cfgRLay = Instance.new("UIListLayout", cfgRight)
+    cfgRLay.Padding = UDim.new(0, 4); cfgRLay.SortOrder = Enum.SortOrder.LayoutOrder
+
+    mkHeader(cfgLeft, "🎈 BALLOON", 1)
+    local balloonForeverBtn = mkButton(cfgLeft, "Ignore: OFF (claim)", C.greenDark, 2, 24)
+    balloonForeverBtn.TextSize = 10
+    mkLabel(cfgLeft, "Timed ignore:", C.textDim, 3, 14)
+    local balloonTimeBox = mkTextBox(cfgLeft, "30m, 2h…", 4)
+    local balloonStatusLbl = mkLabel(cfgLeft, "  Inactive", Color3.fromRGB(100, 150, 100), 5, 14)
+    balloonStatusLbl.TextSize = 10
+
+    mkDivider(cfgLeft, 6)
+    mkHeader(cfgLeft, "🌺 BLOOMS & PETALS", 7)
+    local bloomBtn = mkButton(cfgLeft, "Collect: ON", C.greenDark, 8, 24)
+    bloomBtn.TextSize = 10
+
+    mkHeader(cfgRight, "🔍 UI SCALE", 1)
+    local scaleBox = mkTextBox(cfgRight, "0.4 – 2.5", 2)
     scaleBox.Text = "1.0"
 
-    -- CFG button logic
+    -- CFG logic
     bloomBtn.MouseButton1Click:Connect(function()
-        collectBlooms = not collectBlooms
-        bloomBtn.Text             = collectBlooms and "Collect Blooms & Petals: ON" or "Collect Blooms & Petals: OFF"
+        collectBlooms             = not collectBlooms
+        bloomBtn.Text             = collectBlooms and "Collect: ON" or "Collect: OFF"
         bloomBtn.BackgroundColor3 = collectBlooms and C.greenDark or C.redDark
     end)
 
     balloonForeverBtn.MouseButton1Click:Connect(function()
-        ignoreBalloonEver         = not ignoreBalloonEver
-        balloonForeverBtn.Text    = ignoreBalloonEver and "Ignore Balloon: ON  (skip it)" or "Ignore Balloon: OFF  (claim it)"
+        ignoreBalloonEver              = not ignoreBalloonEver
+        balloonForeverBtn.Text         = ignoreBalloonEver and "Ignore: ON  (skip)" or "Ignore: OFF (claim)"
         balloonForeverBtn.BackgroundColor3 = ignoreBalloonEver and C.redDark or C.greenDark
     end)
 
@@ -991,8 +1444,8 @@ local function createUI()
         local num = tonumber(txt:match("%d+"))
         if num then
             local secs = num * (txt:find("h") and 3600 or 60)
-            ignoreBalloonUntil     = tick() + secs
-            balloonStatusLbl.Text  = "  Ignoring until: "..os.date("%H:%M:%S", os.time()+secs)
+            ignoreBalloonUntil      = tick() + secs
+            balloonStatusLbl.Text   = "  Until "..os.date("%H:%M:%S", os.time()+secs)
             balloonStatusLbl.TextColor3 = C.green
         end
     end)
@@ -1002,7 +1455,7 @@ local function createUI()
         if v then uiScale.Scale = math.clamp(v, 0.4, 2.5) end
     end)
 
-    -- ── Start/Stop button logic ──────────────────────────────
+    -- ── Start/Stop button logic ───────────────────────────────
     startBtn.MouseButton1Click:Connect(function()
         isFarming = not isFarming
         if isFarming then
@@ -1091,6 +1544,20 @@ local function createUI()
         sg:Destroy()
         print("[BlueHive] Destroyed.")
     end)
+
+    -- Store shared UI refs
+    UI = {
+        hS=hS, hM=hM, hH=hH,
+        pS=pS, pM=pM, pH=pH,
+        total=totLbl, time=timeLbl,
+        mm=mmLbl,
+        status=statusLbl, statusDot=statusDot,
+        fieldLbl=fieldActiveLbl,
+        planterProgress=planterProgressLbl,
+        planterRewards=planterRewardsLbl,
+        -- quick stats on farm tab
+        qhS=qhS, qhH=qhH, qpS=qpS, qtot=qtot, qtim=qtim,
+    }
 
     switchTab("FARM")
 end
@@ -1566,6 +2033,12 @@ task.spawn(function()
             UI.total.Text = fmt(honey)
             UI.time.Text  = os.date("!%X", elapsed)
             if UI.fieldLbl then UI.fieldLbl.Text = currentField end
+            -- Quick stats on farm tab
+            if UI.qhS  then UI.qhS.Text  = fmt(dHPS) end
+            if UI.qhH  then UI.qhH.Text  = fmt(dHPS*3600) end
+            if UI.qpS  then UI.qpS.Text  = fmt(pps) end
+            if UI.qtot then UI.qtot.Text  = fmt(honey) end
+            if UI.qtim then UI.qtim.Text  = os.date("!%X", elapsed) end
 
             local lines = {}
             for id,cnt in pairs(totalMMRewards) do
@@ -1749,95 +2222,374 @@ task.spawn(function()
 end)
 
 -- ============================================================
--- 12.5. PLANTER TASK
+-- 12.5. PLANTER TASK  — parallel chain executor (robust)
 -- ============================================================
+--
+-- Design:
+--   • Each chain runs its own watcher coroutine (identified by chain.id,
+--     NOT array index, so delete/add never confuses them).
+--   • All actual character movement is serialised through a single
+--     "planter action queue". Chains enqueue an action when ready;
+--     one dedicated executor coroutine dequeues and runs them one at
+--     a time. This is the ONLY place isClaimingPlanter is set, so
+--     there is no race condition.
+--   • The executor checks ALL global blocking flags before running
+--     each action and re-queues if blocked.
+--   • Sprinkler, booster dispatch, and disk engine all already check
+--     isClaimingPlanter so they yield while we work.
+-- ─────────────────────────────────────────────────────────────
+
+-- Unique ID counter for chains (so index changes don't confuse coroutines)
+local _chainNextId = 0
+local function newChainId()
+    _chainNextId = _chainNextId + 1
+    return _chainNextId
+end
+
+-- Action queue: each entry = { chainId, fn }
+-- fn is a function that performs the full action (place or claim+replant).
+-- It runs inside isClaimingPlanter=true and must clean up itself.
+local planterActionQueue   = {}
+local planterQueueRunning  = false   -- true while the executor is processing one action
+
+-- ── Helpers ──────────────────────────────────────────────────
+
+local function readBulbProgress(bulb)
+    local ga = bulb:FindFirstChild("Gui Attach")
+    local tl = ga and ga:FindFirstChild("Planter Gui")
+               and ga["Planter Gui"]:FindFirstChild("Bar")
+               and ga["Planter Gui"].Bar:FindFirstChild("TextLabel")
+    if not tl then return nil, false, "" end
+    local txt = tl.Text
+    local pct = txt:match("(%d+%.?%d*)%%")
+    local ready = (pct and tonumber(pct) >= 100) or (txt:lower():find("ready") ~= nil)
+    return tonumber(pct), ready, txt
+end
+
+local function findBulbInField(fieldName)
+    local pFolder = workspace:FindFirstChild("Planters")
+    if not pFolder or not Fields[fieldName] then return nil end
+    local fb = Fields[fieldName].bounds
+    for _, bulb in ipairs(pFolder:GetChildren()) do
+        if bulb.Name == "PlanterBulb" then
+            local p = bulb.Position
+            if p.X >= fb.x1 and p.X <= fb.x2 and p.Z >= fb.z1 and p.Z <= fb.z2 then
+                return bulb
+            end
+        end
+    end
+    return nil
+end
+
+local function collectPlanterRewards(pField, hrp, hum)
+    if not Fields[pField] then return end
+    local rewards = {}
+    for _, obj in ipairs(workspace.Collectibles:GetChildren()) do
+        if obj:IsA("BasePart") then
+            local fb  = Fields[pField].bounds
+            local pos = obj.Position
+            if pos.X >= fb.x1 and pos.X <= fb.x2 and pos.Z >= fb.z1 and pos.Z <= fb.z2 then
+                table.insert(rewards, obj)
+                local partID = obj.Name
+                local img = obj:FindFirstChildWhichIsA("Decal") or obj:FindFirstChildWhichIsA("SpecialMesh")
+                if img then
+                    local ex = tostring(img.Texture or img.MeshId or ""):match("%d+")
+                    if ex then partID = ex end
+                end
+                totalPlanterRewards[partID] = (totalPlanterRewards[partID] or 0) + 1
+                if not assetNameCache[partID] then
+                    task.spawn(function() getAssetName(partID) end)
+                end
+            end
+        end
+    end
+    local tStart = tick()
+    for _, token in ipairs(rewards) do
+        if tick() - tStart > 15 then break end
+        while token and token.Parent and tick() - tStart <= 15 do
+            if stepToward(hrp, hum, token.Position, 4) then break end
+            task.wait(0.05)
+        end
+    end
+end
+
+-- Find a chain in planterChains by its unique id field
+local function findChainById(id)
+    for ci, ch in ipairs(planterChains) do
+        if ch.id == id then return ci, ch end
+    end
+    return nil, nil
+end
+
+-- Update the status text of a chain (by id, not index)
+local function setChainStatusById(chainId, txt)
+    local ci, ch = findChainById(chainId)
+    if ch then ch.status = txt end
+    -- Update UI label if it exists and still matches this chain's current index
+    if ci and UI.chainUIRefs and UI.chainUIRefs[ci] then
+        local ref = UI.chainUIRefs[ci]
+        if ref.statusLbl then ref.statusLbl.Text = txt end
+    end
+end
+
+-- ── Global blocking check ─────────────────────────────────────
+-- Returns true if the character is busy with something else entirely
+local function isBusy()
+    return isConverting
+        or activeBooster
+        or isCheckingBoosters
+        or isSolvingMM
+        or warnDisks.processing
+end
+
+-- ── Action queue executor ─────────────────────────────────────
+-- Runs in its own coroutine. Pops one action at a time, waits for
+-- all blocking conditions to clear, then runs the action.
+task.spawn(function()
+    while _G.Running do
+        task.wait(0.5)
+
+        if #planterActionQueue == 0 then continue end
+        if planterQueueRunning   then continue end
+        if not isFarming         then continue end
+        if isBusy()              then continue end
+
+        -- Pop the next action
+        local entry = table.remove(planterActionQueue, 1)
+        if not entry then continue end
+
+        -- Wait again in case something started between pop and execution
+        local waitStart = tick()
+        while isBusy() or not isFarming do
+            if tick() - waitStart > 30 then break end -- safety timeout
+            task.wait(0.5)
+        end
+        if not isFarming then
+            -- Re-queue and try later
+            table.insert(planterActionQueue, 1, entry)
+            continue
+        end
+
+        planterQueueRunning  = true
+        isClaimingPlanter    = true
+
+        local ok, err = pcall(entry.fn)
+        if not ok then
+            warn("[BlueHive] Planter action error: "..tostring(err))
+        end
+
+        isClaimingPlanter   = false
+        planterQueueRunning = false
+
+        -- Small gap between actions so the game can settle
+        task.wait(1)
+    end
+end)
+
+-- ── Chain watcher coroutines ──────────────────────────────────
+-- Each chain gets one coroutine spawned when it's created (keyed by chain.id).
+-- The coroutine loops, checking its field every 2 seconds, and enqueues
+-- actions when needed. It never moves the character itself.
+
+local spawnedChainIds = {}  -- set of chain ids that already have a coroutine
+
+local function watchChain(chainId)
+    while _G.Running do
+        task.wait(2)
+
+        -- Find this chain by id (index may have changed due to deletions)
+        local ci, chain = findChainById(chainId)
+        if not chain then break end  -- chain was deleted, exit coroutine
+
+        -- Master off or chain off
+        if not planterChainsEnabled or not chain.enabled then
+            setChainStatusById(chainId, "off")
+            continue
+        end
+
+        if not isFarming then
+            setChainStatusById(chainId, "waiting")
+            continue
+        end
+
+        local slots = chain.slots
+        if not slots or #slots == 0 then
+            setChainStatusById(chainId, "no slots")
+            continue
+        end
+
+        -- Clamp slot index
+        if chain.currentSlot > #slots then chain.currentSlot = 1 end
+        local si    = chain.currentSlot
+        local slot  = slots[si]
+        local field = slot.field
+        local fData = Fields[field]
+
+        if not fData then
+            setChainStatusById(chainId, "bad field")
+            continue
+        end
+
+        -- Check if this chain already has a pending action in the queue
+        -- (avoid stacking duplicate actions)
+        local alreadyQueued = false
+        for _, e in ipairs(planterActionQueue) do
+            if e.chainId == chainId then alreadyQueued = true; break end
+        end
+        if alreadyQueued then
+            setChainStatusById(chainId, "queued")
+            continue
+        end
+
+        -- Also skip if the executor is currently running THIS chain's action
+        if planterQueueRunning and planterActionQueue[1] and planterActionQueue[1].chainId == chainId then
+            continue
+        end
+
+        -- Look for a bulb in this chain's current slot's field
+        local bulb = findBulbInField(field)
+
+        if not bulb then
+            -- No bulb — enqueue a PLACE action
+            setChainStatusById(chainId, "needs planting")
+            table.insert(planterActionQueue, {
+                chainId = chainId,
+                fn = function()
+                    -- Re-fetch chain in case it changed while queued
+                    local _, ch = findChainById(chainId)
+                    if not ch or not ch.enabled or not planterChainsEnabled then return end
+                    local s = ch.slots[ch.currentSlot]
+                    if not s then return end
+                    local fd = Fields[s.field]
+                    if not fd then return end
+
+                    setChainStatusById(chainId, "placing…")
+                    tpTo(fd.center); anchor(); task.wait(1.5)
+                    pcall(function()
+                        RepStorage.Events.PlayerActivesCommand:FireServer({ Name = s.planterName })
+                    end)
+                    task.wait(2)
+                    unanchor(); tpTo(fieldCenter())
+                    setChainStatusById(chainId, "growing")
+                end
+            })
+
+        else
+            -- Bulb exists — read its progress
+            local pct, ready = readBulbProgress(bulb)
+            local threshold  = slot.claimPct or 100
+
+            if ready or (pct and pct >= threshold) then
+                -- Enqueue a CLAIM+REPLANT action
+                setChainStatusById(chainId, "ready to claim")
+                table.insert(planterActionQueue, {
+                    chainId = chainId,
+                    fn = function()
+                        local _, ch = findChainById(chainId)
+                        if not ch or not ch.enabled or not planterChainsEnabled then return end
+                        local s      = ch.slots[ch.currentSlot]
+                        if not s then return end
+                        local fd     = Fields[s.field]
+                        if not fd then return end
+
+                        -- Re-check the bulb still exists
+                        local b2 = findBulbInField(s.field)
+                        if not b2 then
+                            -- Already gone (another script/player claimed it?)
+                            setChainStatusById(chainId, "growing")
+                            return
+                        end
+
+                        setChainStatusById(chainId, "claiming…")
+                        local _, hrp, hum = getChar()
+                        tpTo(b2.Position); anchor(); task.wait(1.5)
+                        pressE(); unanchor(); task.wait(3)
+
+                        -- Collect rewards
+                        collectPlanterRewards(s.field, hrp, hum)
+                        hum.WalkToPoint = hrp.Position
+
+                        -- Advance slot
+                        local slots2  = ch.slots
+                        local nextSi  = (ch.currentSlot % #slots2) + 1
+                        ch.currentSlot = nextSi
+                        local ns      = slots2[nextSi]
+                        local nfd     = ns and Fields[ns.field]
+
+                        -- Plant next slot's planter
+                        if ns and nfd then
+                            if ns.field == s.field then
+                                -- Same field, plant here
+                                tpTo(b2.Position); anchor(); task.wait(1)
+                                pcall(function()
+                                    RepStorage.Events.PlayerActivesCommand:FireServer({ Name = ns.planterName })
+                                end)
+                                task.wait(2)
+                            else
+                                -- Different field
+                                tpTo(nfd.center); anchor(); task.wait(1.5)
+                                pcall(function()
+                                    RepStorage.Events.PlayerActivesCommand:FireServer({ Name = ns.planterName })
+                                end)
+                                task.wait(2)
+                            end
+                        end
+
+                        unanchor(); tpTo(fieldCenter())
+                        setChainStatusById(chainId, "growing")
+
+                        -- Refresh UI highlight for new active slot
+                        if UI.rebuildChainUI then UI.rebuildChainUI() end
+                    end
+                })
+
+            else
+                -- Still growing — just update status, no action needed
+                local pctStr = pct and string.format("%.0f", pct) or "?"
+                setChainStatusById(chainId, pctStr.."% / "..threshold.."%")
+            end
+        end
+    end
+    -- Coroutine exiting (chain deleted) — clean up spawned set
+    spawnedChainIds[chainId] = nil
+end
+
+-- Planter monitor: update planterProgress display from live bulbs
 task.spawn(function()
     while _G.Running do
         task.wait(2)
-        if not isFarming or isConverting or activeBooster or isSolvingMM or isCheckingBoosters or isClaimingPlanter then continue end
-
         local pFolder = workspace:FindFirstChild("Planters")
         if not pFolder then continue end
-
-        local seenPlanters = {}
+        local seen = {}
         for _, bulb in ipairs(pFolder:GetChildren()) do
             if bulb.Name ~= "PlanterBulb" then continue end
-            local guiAttach = bulb:FindFirstChild("Gui Attach")
-            local textLabel = guiAttach and guiAttach:FindFirstChild("Planter Gui") and guiAttach["Planter Gui"]:FindFirstChild("Bar") and guiAttach["Planter Gui"].Bar:FindFirstChild("TextLabel")
-            if not textLabel then continue end
-            local txt = textLabel.Text
-            local displayName = txt:match("^(.-) %(") or txt:match("^(.-)%s*$") or txt
+            local pct, _, txt = readBulbProgress(bulb)
+            local displayName = (txt ~= "" and (txt:match("^(.-) %(") or txt:match("^(.-)%s*$"))) or "?"
             if #displayName > 24 then displayName = displayName:sub(1,22).."…" end
-            local pct = txt:match("(%d+%.?%d*%%)")
-            local progStr = pct or (txt:lower():find("ready") and "Ready" or "?")
+            local progStr = pct and string.format("%.0f%%", pct) or (txt:lower():find("ready") and "Ready" or "?")
             planterProgress[displayName] = progStr
-            seenPlanters[displayName] = true
+            seen[displayName] = true
         end
         for k in pairs(planterProgress) do
-            if not seenPlanters[k] then planterProgress[k] = nil end
+            if not seen[k] then planterProgress[k] = nil end
         end
+    end
+end)
 
-        for _, bulb in ipairs(pFolder:GetChildren()) do
-            if isClaimingPlanter then break end
-            if bulb.Name ~= "PlanterBulb" then continue end
-            local guiAttach = bulb:FindFirstChild("Gui Attach")
-            local textLabel = guiAttach and guiAttach:FindFirstChild("Planter Gui") and guiAttach["Planter Gui"]:FindFirstChild("Bar") and guiAttach["Planter Gui"].Bar:FindFirstChild("TextLabel")
-            if not textLabel then continue end
-            local txt = textLabel.Text
-            local pct = txt:match("(%d+%.?%d*)%%")
-            local isReady = (pct and tonumber(pct) >= 100) or txt:lower():find("ready")
-            if not isReady then continue end
-            local pField = nil
-            for fname, fdata in pairs(Fields) do
-                if bulb.Position.X >= fdata.bounds.x1 and bulb.Position.X <= fdata.bounds.x2 and
-                   bulb.Position.Z >= fdata.bounds.z1 and bulb.Position.Z <= fdata.bounds.z2 then
-                    pField = fname; break
-                end
+-- Chain spawner: watches planterChains and spawns a watcher coroutine
+-- for any chain that doesn't have one yet. Uses chain.id so index
+-- changes (deletions/insertions) never cause double-spawning or gaps.
+task.spawn(function()
+    while _G.Running do
+        task.wait(1)
+        for _, chain in ipairs(planterChains) do
+            if not chain.id then
+                chain.id = newChainId()
             end
-            if not pField then continue end
-            local pName = txt:match("^(.-) %(") or txt:match("^(.-)%s*$")
-            if not pName then continue end
-            isClaimingPlanter = true
-            local _, hrp, hum = getChar()
-            local bulbPos = bulb.Position
-            tpTo(bulbPos); anchor(); task.wait(1.5)
-            pressE(); unanchor(); task.wait(3)
-            local planterRewards = {}
-            for _, obj in ipairs(workspace.Collectibles:GetChildren()) do
-                if obj:IsA("BasePart") then
-                    local fb = Fields[pField].bounds
-                    local pos = obj.Position
-                    if pos.X >= fb.x1 and pos.X <= fb.x2 and pos.Z >= fb.z1 and pos.Z <= fb.z2 then
-                        table.insert(planterRewards, obj)
-                        local partID = obj.Name
-                        local img = obj:FindFirstChildWhichIsA("Decal") or obj:FindFirstChildWhichIsA("SpecialMesh")
-                        if img then
-                            local tex = tostring(img.Texture or img.MeshId or "")
-                            local extracted = tex:match("%d+")
-                            if extracted then partID = extracted end
-                        end
-                        totalPlanterRewards[partID] = (totalPlanterRewards[partID] or 0) + 1
-                        if not assetNameCache[partID] then
-                            task.spawn(function() getAssetName(partID) end)
-                        end
-                    end
-                end
+            if not spawnedChainIds[chain.id] then
+                spawnedChainIds[chain.id] = true
+                task.spawn(function() watchChain(chain.id) end)
             end
-            local tStart = tick()
-            for _, token in ipairs(planterRewards) do
-                if tick() - tStart > 15 then break end
-                while token and token.Parent and (tick() - tStart <= 15) do
-                    local reached = stepToward(hrp, hum, token.Position, 4)
-                    if reached then break end
-                    task.wait(0.05)
-                end
-            end
-            hum.WalkToPoint = hrp.Position
-            tpTo(bulbPos); anchor(); task.wait(1)
-            pcall(function() RepStorage.Events.PlayerActivesCommand:FireServer({Name = pName}) end)
-            task.wait(3); unanchor(); tpTo(fieldCenter())
-            isClaimingPlanter = false
-            break
         end
     end
 end)
