@@ -514,6 +514,65 @@ local C = {
     purple    = Color3.fromRGB(180, 100, 255),
 }
 
+-- ============================================================
+-- 4.5. PLANTER CONFIG  — save / load JSON
+-- (defined before createUI so UI button closures can call them)
+-- ============================================================
+local PLANTER_CFG_PATH = LOG_ROOT.."/planters.json"
+
+local function savePlanterConfig()
+    pcall(function()
+        ensureDir(LOG_ROOT)
+        local data = {}
+        for _, chain in ipairs(planterChains) do
+            local slots = {}
+            for _, s in ipairs(chain.slots) do
+                table.insert(slots, {
+                    planterName = s.planterName,
+                    field       = s.field,
+                    claimPct    = s.claimPct,
+                })
+            end
+            table.insert(data, {
+                enabled     = chain.enabled,
+                currentSlot = chain.currentSlot,
+                slots       = slots,
+            })
+        end
+        writefile(PLANTER_CFG_PATH, HttpService:JSONEncode({ chains = data }))
+    end)
+end
+
+local function loadPlanterConfig()
+    pcall(function()
+        if not isfile(PLANTER_CFG_PATH) then return end
+        local raw = readfile(PLANTER_CFG_PATH)
+        local ok, parsed = pcall(function() return HttpService:JSONDecode(raw) end)
+        if not ok or not parsed or not parsed.chains then return end
+        planterChains = {}
+        for _, cd in ipairs(parsed.chains) do
+            local slots = {}
+            for _, s in ipairs(cd.slots or {}) do
+                table.insert(slots, {
+                    planterName = tostring(s.planterName or PlanterNames[1]),
+                    field       = tostring(s.field or FieldOrder[1]),
+                    claimPct    = math.clamp(tonumber(s.claimPct) or 100, 1, 100),
+                })
+            end
+            if #slots == 0 then
+                table.insert(slots, { planterName=PlanterNames[1], field=FieldOrder[1], claimPct=100 })
+            end
+            table.insert(planterChains, {
+                id          = newChainId(),
+                enabled     = cd.enabled == true,
+                currentSlot = math.max(1, tonumber(cd.currentSlot) or 1),
+                slots       = slots,
+                status      = "—",
+            })
+        end
+    end)
+end
+
 local function createUI()
     local old = LP.PlayerGui:FindFirstChild("BH_UI")
     if old then old:Destroy() end
@@ -1610,63 +1669,6 @@ local function createUI()
     switchTab("FARM")
 end
 
--- ============================================================
--- 4.5. PLANTER CONFIG  — save / load JSON
--- ============================================================
-local PLANTER_CFG_PATH = LOG_ROOT.."/planters.json"
-
-local function savePlanterConfig()
-    pcall(function()
-        ensureDir(LOG_ROOT)
-        local data = {}
-        for _, chain in ipairs(planterChains) do
-            local slots = {}
-            for _, s in ipairs(chain.slots) do
-                table.insert(slots, {
-                    planterName = s.planterName,
-                    field       = s.field,
-                    claimPct    = s.claimPct,
-                })
-            end
-            table.insert(data, {
-                enabled     = chain.enabled,
-                currentSlot = chain.currentSlot,
-                slots       = slots,
-            })
-        end
-        writefile(PLANTER_CFG_PATH, HttpService:JSONEncode({ chains = data }))
-    end)
-end
-
-local function loadPlanterConfig()
-    pcall(function()
-        if not isfile(PLANTER_CFG_PATH) then return end
-        local raw = readfile(PLANTER_CFG_PATH)
-        local ok, parsed = pcall(function() return HttpService:JSONDecode(raw) end)
-        if not ok or not parsed or not parsed.chains then return end
-        planterChains = {}
-        for _, cd in ipairs(parsed.chains) do
-            local slots = {}
-            for _, s in ipairs(cd.slots or {}) do
-                table.insert(slots, {
-                    planterName = tostring(s.planterName or PlanterNames[1]),
-                    field       = tostring(s.field or FieldOrder[1]),
-                    claimPct    = math.clamp(tonumber(s.claimPct) or 100, 1, 100),
-                })
-            end
-            if #slots == 0 then
-                table.insert(slots, { planterName=PlanterNames[1], field=FieldOrder[1], claimPct=100 })
-            end
-            table.insert(planterChains, {
-                id          = newChainId(),
-                enabled     = cd.enabled == true,
-                currentSlot = math.max(1, tonumber(cd.currentSlot) or 1),
-                slots       = slots,
-                status      = "—",
-            })
-        end
-    end)
-end
 createUI()
 
 -- Load saved planter config then refresh the PLANT tab
