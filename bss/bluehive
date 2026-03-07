@@ -162,7 +162,7 @@ local PlanterNames = {
     "The Planter Of Plenty",
 }
 
--- ── Chain ID helpers (must be defined before createUI so UI closures can call them) ──
+-- ── Chain helpers (must be defined before createUI so UI closures can call them) ──
 local _chainNextId = 0
 local function newChainId()
     _chainNextId = _chainNextId + 1
@@ -175,6 +175,10 @@ local function findChainById(id)
     end
     return nil, nil
 end
+
+-- Action queue referenced by remove-chain button closure inside createUI
+local planterActionQueue  = {}
+local planterQueueRunning = false
 
 local totalPollen        = 0
 local lastPollenRaw      = LP.CoreStats.Pollen.Value
@@ -2253,13 +2257,7 @@ end)
 --     isClaimingPlanter so they yield while we work.
 -- ─────────────────────────────────────────────────────────────
 
--- Action queue: each entry = { chainId, fn }
--- fn is a function that performs the full action (place or claim+replant).
--- It runs inside isClaimingPlanter=true and must clean up itself.
-local planterActionQueue   = {}
-local planterQueueRunning  = false   -- true while the executor is processing one action
-
--- ── Helpers ──────────────────────────────────────────────────
+-- ── Action queue executor ─────────────────────────────────────
 
 local function readBulbProgress(bulb)
     local ga = bulb:FindFirstChild("Gui Attach")
