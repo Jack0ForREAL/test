@@ -1484,10 +1484,6 @@ local function createUI()
         rebuildChainUI()
     end)
 
-    -- Expose to planter task
-    UI.rebuildChainUI = rebuildChainUI
-    UI.chainUIRefs    = chainUIRefs
-
     rebuildChainUI()   -- draw initial state (just the "+ Add Cycle" button)
 
     -- ════════════════════════════════════════════════════════
@@ -1664,6 +1660,9 @@ local function createUI()
         planterRewards=planterRewardsLbl,
         -- quick stats on farm tab
         qhS=qhS, qhH=qhH, qpS=qpS, qtot=qtot, qtim=qtim,
+        -- planter chain UI (set by PLANT tab section above)
+        rebuildChainUI = rebuildChainUI,
+        chainUIRefs    = chainUIRefs,
     }
 
     switchTab("FARM")
