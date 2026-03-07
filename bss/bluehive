@@ -85,7 +85,6 @@ local FieldOrder = {
 
 local Boosters = {
     ["Blue Field Booster"]  = { pos=Vector3.new(272,59,84),      collectibles=false, time=2700  },
-    ["Field Booster"]       = { pos=Vector3.new(-40, 176, -189), collectibles=false, time=2700  },
     ["Wealth Clock"]        = { pos=Vector3.new(330,50,191),     collectibles=false, time=3600  },
     ["Stockings"]           = { pos=Vector3.new(232,38,232),     collectibles=true,  time=3600  },
     ["Onett"]               = { pos=Vector3.new(34,236,-512),    collectibles=true,  time=28800 },
@@ -162,6 +161,21 @@ local PlanterNames = {
     "Petal Planter",
     "The Planter Of Plenty",
 }
+
+-- ── Chain ID helpers (must be defined before createUI so UI closures can call them) ──
+local _chainNextId = 0
+local function newChainId()
+    _chainNextId = _chainNextId + 1
+    return _chainNextId
+end
+
+local function findChainById(id)
+    for ci, ch in ipairs(planterChains) do
+        if ch.id == id then return ci, ch end
+    end
+    return nil, nil
+end
+
 local totalPollen        = 0
 local lastPollenRaw      = LP.CoreStats.Pollen.Value
 local sessionStart       = tick()
@@ -2239,13 +2253,6 @@ end)
 --     isClaimingPlanter so they yield while we work.
 -- ─────────────────────────────────────────────────────────────
 
--- Unique ID counter for chains (so index changes don't confuse coroutines)
-local _chainNextId = 0
-local function newChainId()
-    _chainNextId = _chainNextId + 1
-    return _chainNextId
-end
-
 -- Action queue: each entry = { chainId, fn }
 -- fn is a function that performs the full action (place or claim+replant).
 -- It runs inside isClaimingPlanter=true and must clean up itself.
@@ -2311,14 +2318,6 @@ local function collectPlanterRewards(pField, hrp, hum)
             task.wait(0.05)
         end
     end
-end
-
--- Find a chain in planterChains by its unique id field
-local function findChainById(id)
-    for ci, ch in ipairs(planterChains) do
-        if ch.id == id then return ci, ch end
-    end
-    return nil, nil
 end
 
 -- Update the status text of a chain (by id, not index)
