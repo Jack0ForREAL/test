@@ -1214,6 +1214,7 @@ local function createUI()
             onBtn.MouseButton1Click:Connect(function()
                 local _, ch = findChainById(capturedId)
                 if ch then ch.enabled = not ch.enabled end
+                savePlanterConfig()
                 rebuildChainUI()
             end)
 
@@ -1237,6 +1238,7 @@ local function createUI()
                         claimPct    = 100,
                     })
                 end
+                savePlanterConfig()
                 rebuildChainUI()
             end)
 
@@ -1261,6 +1263,7 @@ local function createUI()
                         table.remove(planterChains, rci); break
                     end
                 end
+                savePlanterConfig()
                 rebuildChainUI()
             end)
 
@@ -1320,7 +1323,10 @@ local function createUI()
                 local pDrop, getPName = mkDropdown(row, PlanterNames, slot.planterName, x, 1, planterW, rowH)
                 pDrop.MouseButton1Click:Connect(function()
                     local _, ch = findChainById(capturedId)
-                    if ch and ch.slots[capturedSi] then ch.slots[capturedSi].planterName = getPName() end
+                    if ch and ch.slots[capturedSi] then
+                        ch.slots[capturedSi].planterName = getPName()
+                        savePlanterConfig()
+                    end
                 end)
                 x = x + planterW + 3
 
@@ -1328,7 +1334,10 @@ local function createUI()
                 local fDrop, getFName = mkDropdown(row, FieldOrder, slot.field, x, 1, COL_FIELD_W, rowH)
                 fDrop.MouseButton1Click:Connect(function()
                     local _, ch = findChainById(capturedId)
-                    if ch and ch.slots[capturedSi] then ch.slots[capturedSi].field = getFName() end
+                    if ch and ch.slots[capturedSi] then
+                        ch.slots[capturedSi].field = getFName()
+                        savePlanterConfig()
+                    end
                 end)
                 x = x + COL_FIELD_W + 3
 
@@ -1348,7 +1357,10 @@ local function createUI()
                 pctBox.FocusLost:Connect(function()
                     local v = math.clamp(tonumber(pctBox.Text:match("[%d%.]+")) or 100, 1, 100)
                     local _, ch = findChainById(capturedId)
-                    if ch and ch.slots[capturedSi] then ch.slots[capturedSi].claimPct = v end
+                    if ch and ch.slots[capturedSi] then
+                        ch.slots[capturedSi].claimPct = v
+                        savePlanterConfig()
+                    end
                     pctBox.Text = tostring(v)
                 end)
                 x = x + COL_PCT_W + 3
@@ -1368,6 +1380,7 @@ local function createUI()
                     if not ch or #ch.slots <= 1 then return end
                     table.remove(ch.slots, capturedSi)
                     if ch.currentSlot > #ch.slots then ch.currentSlot = 1 end
+                    savePlanterConfig()
                     rebuildChainUI()
                 end)
 
@@ -1397,6 +1410,7 @@ local function createUI()
                 currentSlot = 1,
                 status      = "—",
             })
+            savePlanterConfig()
             rebuildChainUI()
         end)
         table.insert(chainFrameRefs, addCycleBtn)
@@ -1595,7 +1609,69 @@ local function createUI()
 
     switchTab("FARM")
 end
+
+-- ============================================================
+-- 4.5. PLANTER CONFIG  — save / load JSON
+-- ============================================================
+local PLANTER_CFG_PATH = LOG_ROOT.."/planters.json"
+
+local function savePlanterConfig()
+    pcall(function()
+        ensureDir(LOG_ROOT)
+        local data = {}
+        for _, chain in ipairs(planterChains) do
+            local slots = {}
+            for _, s in ipairs(chain.slots) do
+                table.insert(slots, {
+                    planterName = s.planterName,
+                    field       = s.field,
+                    claimPct    = s.claimPct,
+                })
+            end
+            table.insert(data, {
+                enabled     = chain.enabled,
+                currentSlot = chain.currentSlot,
+                slots       = slots,
+            })
+        end
+        writefile(PLANTER_CFG_PATH, HttpService:JSONEncode({ chains = data }))
+    end)
+end
+
+local function loadPlanterConfig()
+    pcall(function()
+        if not isfile(PLANTER_CFG_PATH) then return end
+        local raw = readfile(PLANTER_CFG_PATH)
+        local ok, parsed = pcall(function() return HttpService:JSONDecode(raw) end)
+        if not ok or not parsed or not parsed.chains then return end
+        planterChains = {}
+        for _, cd in ipairs(parsed.chains) do
+            local slots = {}
+            for _, s in ipairs(cd.slots or {}) do
+                table.insert(slots, {
+                    planterName = tostring(s.planterName or PlanterNames[1]),
+                    field       = tostring(s.field or FieldOrder[1]),
+                    claimPct    = math.clamp(tonumber(s.claimPct) or 100, 1, 100),
+                })
+            end
+            if #slots == 0 then
+                table.insert(slots, { planterName=PlanterNames[1], field=FieldOrder[1], claimPct=100 })
+            end
+            table.insert(planterChains, {
+                id          = newChainId(),
+                enabled     = cd.enabled == true,
+                currentSlot = math.max(1, tonumber(cd.currentSlot) or 1),
+                slots       = slots,
+                status      = "—",
+            })
+        end
+    end)
+end
 createUI()
+
+-- Load saved planter config then refresh the PLANT tab
+loadPlanterConfig()
+if UI.rebuildChainUI then UI.rebuildChainUI() end
 
 -- ============================================================
 -- 5. POLLEN WATCHER
@@ -2526,6 +2602,7 @@ local function watchChain(chainId)
                         local slots2  = ch.slots
                         local nextSi  = (ch.currentSlot % #slots2) + 1
                         ch.currentSlot = nextSi
+                        savePlanterConfig()
                         local ns      = slots2[nextSi]
                         local nfd     = ns and Fields[ns.field]
 
