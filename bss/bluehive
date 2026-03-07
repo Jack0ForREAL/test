@@ -1067,13 +1067,15 @@ local function createUI()
     -- ════════════════════════════════════════════════════════
     local plantTab = tabFrames["PLANT"]
 
-    -- ── Master toggle + chain scroll ─────────────────────────
+    -- ── Master toggle ─────────────────────────────────────────
     local masterToggleBtn = mkButton(plantTab, "🌱 Auto-Plant: OFF", C.card, 1, 22)
     masterToggleBtn.TextSize = 11
 
-    -- Outer scroll holds all chains
+    -- ── Outer scrolling frame that holds all chain cards ───────
+    -- Fixed pixel height so it's always visible even when empty
+    local PLANT_SCROLL_H = CONTENT_H - 30
     local chainOuterScroll = Instance.new("ScrollingFrame", plantTab)
-    chainOuterScroll.Size                  = UDim2.new(1, 0, 0, CONTENT_H - 32)
+    chainOuterScroll.Size                  = UDim2.new(1, 0, 0, PLANT_SCROLL_H)
     chainOuterScroll.BackgroundTransparency = 1
     chainOuterScroll.BorderSizePixel       = 0
     chainOuterScroll.ScrollBarThickness    = 3
@@ -1082,127 +1084,152 @@ local function createUI()
     chainOuterScroll.CanvasSize            = UDim2.new(0, 0, 0, 0)
     chainOuterScroll.LayoutOrder           = 2
     local chainOuterLay = Instance.new("UIListLayout", chainOuterScroll)
-    chainOuterLay.Padding   = UDim.new(0, 6)
+    chainOuterLay.Padding   = UDim.new(0, 5)
     chainOuterLay.SortOrder = Enum.SortOrder.LayoutOrder
     local chainOuterPad = Instance.new("UIPadding", chainOuterScroll)
-    chainOuterPad.PaddingLeft = UDim.new(0, 2); chainOuterPad.PaddingRight  = UDim.new(0, 4)
-    chainOuterPad.PaddingTop  = UDim.new(0, 3); chainOuterPad.PaddingBottom = UDim.new(0, 4)
+    chainOuterPad.PaddingLeft   = UDim.new(0, 2)
+    chainOuterPad.PaddingRight  = UDim.new(0, 4)
+    chainOuterPad.PaddingTop    = UDim.new(0, 4)
+    chainOuterPad.PaddingBottom = UDim.new(0, 4)
 
-    -- ── Helper: build a cycling dropdown button ───────────────
-    -- values = table of strings, returns { frame, getValue }
-    local function mkCycleBtn(parent, values, order, w)
+    -- ── Pixel widths for slot row columns (total = card inner width) ─
+    -- Card inner width ≈ (tab width) - 2*outer_pad - 2*card_pad
+    -- We use pixel offsets from left edge of slotRow:
+    --   [0..11]   = slot number label  (12px)
+    --   [12..end-60] = planter btn
+    --   [end-58..end-22] = field btn   (36px wide)
+    --   [end-20..end-10] = % box       (24px wide … actually use 30)
+    --   last 18px = ✕ button
+    -- Easier to just use absolute pixel positions keyed off 0:
+
+    local COL_NUM_W   = 12   -- slot number
+    local COL_DEL_W   = 18   -- ✕ button (rightmost)
+    local COL_PCT_W   = 28   -- % box
+    local COL_FIELD_W = 80   -- field dropdown
+    -- planter btn fills the rest
+
+    -- ── Helper: make a simple cycling dropdown (no LayoutOrder, no parent layout) ─
+    local function mkDropdown(parent, values, initVal, x, y, w, h)
         local idx = 1
+        for i, v in ipairs(values) do if v == initVal then idx = i; break end end
         local btn = Instance.new("TextButton", parent)
-        btn.Size             = UDim2.new(w or 1, 0, 0, 20)
-        btn.BackgroundColor3 = C.card
+        btn.Position         = UDim2.new(0, x, 0, y)
+        btn.Size             = UDim2.new(0, w, 0, h)
+        btn.BackgroundColor3 = C.bg
         btn.BorderSizePixel  = 0
         btn.Text             = values[idx]
         btn.TextColor3       = C.accent
         btn.Font             = Enum.Font.Gotham
-        btn.TextSize         = 9
-        btn.LayoutOrder      = order or 0
+        btn.TextSize         = 8
         btn.TextTruncate     = Enum.TextTruncate.AtEnd
-        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
-        local lPad = Instance.new("UIPadding", btn)
-        lPad.PaddingLeft = UDim.new(0, 4); lPad.PaddingRight = UDim.new(0, 4)
+        btn.ClipsDescendants = true
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 3)
+        local pad = Instance.new("UIPadding", btn)
+        pad.PaddingLeft  = UDim.new(0, 3)
+        pad.PaddingRight = UDim.new(0, 3)
         btn.MouseButton1Click:Connect(function()
             idx = (idx % #values) + 1
             btn.Text = values[idx]
         end)
-        return btn, function() return values[idx] end, function(v)
-            for i, val in ipairs(values) do
-                if val == v then idx = i; btn.Text = val; return end
-            end
-        end
+        return btn, function() return values[idx] end
     end
 
-    -- ── Chain UI builder ─────────────────────────────────────
-    local chainFrameRefs = {}   -- [chainIdx] = outer frame
-    local chainUIRefs    = {}   -- [chainIdx] = { slotFrames={}, statusLbl, slotScrollFrame }
+    -- ── Chain card builder ────────────────────────────────────
+    local chainFrameRefs = {}
+    local chainUIRefs    = {}
 
     local function rebuildChainUI()
-        -- destroy all existing chain frames
-        for _, f in ipairs(chainFrameRefs) do f:Destroy() end
+        for _, f in ipairs(chainFrameRefs) do
+            if f and f.Parent then f:Destroy() end
+        end
         chainFrameRefs = {}
         chainUIRefs    = {}
 
+        -- One card per chain
         for ci, chain in ipairs(planterChains) do
-            -- ── Chain card ────────────────────────────────────
-            local chainCard = Instance.new("Frame", chainOuterScroll)
-            chainCard.BackgroundColor3 = C.card
-            chainCard.BorderSizePixel  = 0
-            chainCard.LayoutOrder      = ci
-            chainCard.AutomaticSize    = Enum.AutomaticSize.Y
-            Instance.new("UICorner", chainCard).CornerRadius = UDim.new(0, 7)
-            local cardStroke = Instance.new("UIStroke", chainCard)
-            cardStroke.Color     = chain.enabled and C.accent or C.border
-            cardStroke.Thickness = 1
-            local cardLay = Instance.new("UIListLayout", chainCard)
-            cardLay.Padding   = UDim.new(0, 3)
-            cardLay.SortOrder = Enum.SortOrder.LayoutOrder
-            local cardPad = Instance.new("UIPadding", chainCard)
-            cardPad.PaddingLeft   = UDim.new(0, 5); cardPad.PaddingRight  = UDim.new(0, 5)
-            cardPad.PaddingTop    = UDim.new(0, 5); cardPad.PaddingBottom = UDim.new(0, 5)
+            local capturedId = chain.id
 
-            -- Chain header row
-            local hdrRow = Instance.new("Frame", chainCard)
-            hdrRow.Size             = UDim2.new(1, 0, 0, 20)
-            hdrRow.BackgroundTransparency = 1
-            hdrRow.LayoutOrder      = 1
+            -- Card frame — AutomaticSize so it grows with slots
+            local card = Instance.new("Frame", chainOuterScroll)
+            card.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+            card.BorderSizePixel  = 0
+            card.LayoutOrder      = ci
+            card.AutomaticSize    = Enum.AutomaticSize.Y
+            card.Size             = UDim2.new(1, 0, 0, 0)
+            Instance.new("UICorner", card).CornerRadius = UDim.new(0, 6)
+            local stroke = Instance.new("UIStroke", card)
+            stroke.Color     = chain.enabled and C.accent or C.border
+            stroke.Thickness = 1
 
-            local chainLbl = Instance.new("TextLabel", hdrRow)
-            chainLbl.Size                 = UDim2.new(0, 60, 1, 0)
-            chainLbl.BackgroundTransparency = 1
-            chainLbl.Text                 = "Cycle #"..ci
-            chainLbl.TextColor3           = chain.enabled and C.accent or C.textDim
-            chainLbl.Font                 = Enum.Font.GothamBold
-            chainLbl.TextSize             = 11
-            chainLbl.TextXAlignment       = Enum.TextXAlignment.Left
+            -- Card list layout
+            local cardList = Instance.new("UIListLayout", card)
+            cardList.Padding   = UDim.new(0, 2)
+            cardList.SortOrder = Enum.SortOrder.LayoutOrder
+            local cardPad = Instance.new("UIPadding", card)
+            cardPad.PaddingLeft   = UDim.new(0, 5)
+            cardPad.PaddingRight  = UDim.new(0, 5)
+            cardPad.PaddingTop    = UDim.new(0, 4)
+            cardPad.PaddingBottom = UDim.new(0, 4)
 
-            -- Status label (centre)
-            local chainStatusLbl = Instance.new("TextLabel", hdrRow)
-            chainStatusLbl.Size                 = UDim2.new(1, -160, 1, 0)
-            chainStatusLbl.Position             = UDim2.new(0, 62, 0, 0)
-            chainStatusLbl.BackgroundTransparency = 1
-            chainStatusLbl.Text                 = chain.status or "—"
-            chainStatusLbl.TextColor3           = C.textDim
-            chainStatusLbl.Font                 = Enum.Font.Gotham
-            chainStatusLbl.TextSize             = 9
-            chainStatusLbl.TextXAlignment       = Enum.TextXAlignment.Left
-            chainStatusLbl.TextTruncate         = Enum.TextTruncate.AtEnd
+            -- ── Header row ──────────────────────────────────
+            local hdr = Instance.new("Frame", card)
+            hdr.Size             = UDim2.new(1, 0, 0, 18)
+            hdr.BackgroundTransparency = 1
+            hdr.LayoutOrder      = 1
 
-            -- Enable toggle
-            local enBtn = Instance.new("TextButton", hdrRow)
-            enBtn.Size             = UDim2.new(0, 36, 0, 16)
-            enBtn.Position         = UDim2.new(1, -78, 0.5, -8)
-            enBtn.BackgroundColor3 = chain.enabled and C.greenDark or C.redDark
-            enBtn.BorderSizePixel  = 0
-            enBtn.Text             = chain.enabled and "ON" or "OFF"
-            enBtn.TextColor3       = chain.enabled and C.green or Color3.fromRGB(255,100,100)
-            enBtn.Font             = Enum.Font.GothamBold
-            enBtn.TextSize         = 9
-            Instance.new("UICorner", enBtn).CornerRadius = UDim.new(0, 4)
-            local capturedChainId = chain.id
-            enBtn.MouseButton1Click:Connect(function()
-                local _, ch = findChainById(capturedChainId)
+            -- "Cycle #N" label
+            local cycLbl = Instance.new("TextLabel", hdr)
+            cycLbl.Size                 = UDim2.new(0, 56, 1, 0)
+            cycLbl.Position             = UDim2.new(0, 0, 0, 0)
+            cycLbl.BackgroundTransparency = 1
+            cycLbl.Text                 = "Cycle #"..ci
+            cycLbl.TextColor3           = chain.enabled and C.accent or C.textDim
+            cycLbl.Font                 = Enum.Font.GothamBold
+            cycLbl.TextSize             = 10
+            cycLbl.TextXAlignment       = Enum.TextXAlignment.Left
+
+            -- Status label (fills middle)
+            local statusLbl = Instance.new("TextLabel", hdr)
+            statusLbl.Size                 = UDim2.new(1, -150, 1, 0)
+            statusLbl.Position             = UDim2.new(0, 58, 0, 0)
+            statusLbl.BackgroundTransparency = 1
+            statusLbl.Text                 = chain.status or "—"
+            statusLbl.TextColor3           = C.textDim
+            statusLbl.Font                 = Enum.Font.Gotham
+            statusLbl.TextSize             = 8
+            statusLbl.TextXAlignment       = Enum.TextXAlignment.Left
+            statusLbl.TextTruncate         = Enum.TextTruncate.AtEnd
+
+            -- ON/OFF toggle (right side)
+            local onBtn = Instance.new("TextButton", hdr)
+            onBtn.Size             = UDim2.new(0, 32, 0, 14)
+            onBtn.Position         = UDim2.new(1, -88, 0.5, -7)
+            onBtn.BackgroundColor3 = chain.enabled and C.greenDark or Color3.fromRGB(50,20,20)
+            onBtn.BorderSizePixel  = 0
+            onBtn.Text             = chain.enabled and "ON" or "OFF"
+            onBtn.TextColor3       = chain.enabled and C.green or Color3.fromRGB(200,80,80)
+            onBtn.Font             = Enum.Font.GothamBold
+            onBtn.TextSize         = 8
+            Instance.new("UICorner", onBtn).CornerRadius = UDim.new(0, 3)
+            onBtn.MouseButton1Click:Connect(function()
+                local _, ch = findChainById(capturedId)
                 if ch then ch.enabled = not ch.enabled end
                 rebuildChainUI()
             end)
 
-            -- Add slot button
-            local addSlotBtn = Instance.new("TextButton", hdrRow)
-            addSlotBtn.Size             = UDim2.new(0, 18, 0, 16)
-            addSlotBtn.Position         = UDim2.new(1, -38, 0.5, -8)
-            addSlotBtn.BackgroundColor3 = Color3.fromRGB(0, 60, 30)
+            -- "+ slot" button
+            local addSlotBtn = Instance.new("TextButton", hdr)
+            addSlotBtn.Size             = UDim2.new(0, 40, 0, 14)
+            addSlotBtn.Position         = UDim2.new(1, -53, 0.5, -7)
+            addSlotBtn.BackgroundColor3 = Color3.fromRGB(0, 50, 25)
             addSlotBtn.BorderSizePixel  = 0
-            addSlotBtn.Text             = "+"
+            addSlotBtn.Text             = "+Slot"
             addSlotBtn.TextColor3       = C.green
             addSlotBtn.Font             = Enum.Font.GothamBold
-            addSlotBtn.TextSize         = 12
-            Instance.new("UICorner", addSlotBtn).CornerRadius = UDim.new(0, 4)
+            addSlotBtn.TextSize         = 8
+            Instance.new("UICorner", addSlotBtn).CornerRadius = UDim.new(0, 3)
             addSlotBtn.MouseButton1Click:Connect(function()
-                -- find by id so index doesn't matter
-                local _, ch = findChainById(chain.id)
+                local _, ch = findChainById(capturedId)
                 if ch then
                     table.insert(ch.slots, {
                         planterName = PlanterNames[1],
@@ -1213,193 +1240,182 @@ local function createUI()
                 rebuildChainUI()
             end)
 
-            -- Remove chain button
-            local remChainBtn = Instance.new("TextButton", hdrRow)
-            remChainBtn.Size             = UDim2.new(0, 16, 0, 16)
-            remChainBtn.Position         = UDim2.new(1, -17, 0.5, -8)
-            remChainBtn.BackgroundTransparency = 1
-            remChainBtn.BorderSizePixel  = 0
-            remChainBtn.Text             = "✕"
-            remChainBtn.TextColor3       = C.textDim
-            remChainBtn.Font             = Enum.Font.GothamBold
-            remChainBtn.TextSize         = 10
-            remChainBtn.MouseButton1Click:Connect(function()
-                local rci = nil
-                for idx, ch in ipairs(planterChains) do
-                    if ch.id == capturedChainId then rci = idx; break end
-                end
-                if rci then
-                    -- Clear any queued actions for this chain
-                    for qi = #planterActionQueue, 1, -1 do
-                        if planterActionQueue[qi].chainId == capturedChainId then
-                            table.remove(planterActionQueue, qi)
-                        end
+            -- ✕ remove chain button
+            local delChainBtn = Instance.new("TextButton", hdr)
+            delChainBtn.Size             = UDim2.new(0, 10, 0, 14)
+            delChainBtn.Position         = UDim2.new(1, -10, 0.5, -7)
+            delChainBtn.BackgroundTransparency = 1
+            delChainBtn.BorderSizePixel  = 0
+            delChainBtn.Text             = "✕"
+            delChainBtn.TextColor3       = C.textDim
+            delChainBtn.Font             = Enum.Font.GothamBold
+            delChainBtn.TextSize         = 9
+            delChainBtn.MouseButton1Click:Connect(function()
+                for qi = #planterActionQueue, 1, -1 do
+                    if planterActionQueue[qi].chainId == capturedId then
+                        table.remove(planterActionQueue, qi)
                     end
-                    table.remove(planterChains, rci)
+                end
+                for rci, ch in ipairs(planterChains) do
+                    if ch.id == capturedId then
+                        table.remove(planterChains, rci); break
+                    end
                 end
                 rebuildChainUI()
             end)
 
-            -- ── Column headers ────────────────────────────────
-            local colHdr = Instance.new("Frame", chainCard)
-            colHdr.Size             = UDim2.new(1, 0, 0, 14)
+            -- ── Column header row ────────────────────────────
+            local colHdr = Instance.new("Frame", card)
+            colHdr.Size             = UDim2.new(1, 0, 0, 12)
             colHdr.BackgroundTransparency = 1
             colHdr.LayoutOrder      = 2
-            local function colLbl(txt, xPos, w)
+            local function mkColLbl(txt, xpx, wpx)
                 local l = Instance.new("TextLabel", colHdr)
-                l.Size                 = UDim2.new(w, 0, 1, 0)
-                l.Position             = UDim2.new(xPos, 0, 0, 0)
+                l.Size                 = UDim2.new(0, wpx, 1, 0)
+                l.Position             = UDim2.new(0, xpx, 0, 0)
                 l.BackgroundTransparency = 1
                 l.Text                 = txt
                 l.TextColor3           = C.textDim
                 l.Font                 = Enum.Font.GothamBold
-                l.TextSize             = 8
+                l.TextSize             = 7
                 l.TextXAlignment       = Enum.TextXAlignment.Left
             end
-            colLbl("PLANTER",   0,     0.38)
-            colLbl("FIELD",     0.38,  0.37)
-            colLbl("%",         0.75,  0.12)
-            colLbl("",          0.87,  0.13)  -- actions col
+            mkColLbl("#",       0,                    COL_NUM_W)
+            mkColLbl("PLANTER", COL_NUM_W + 2,        80)
+            mkColLbl("FIELD",   COL_NUM_W + 80 + 4,   COL_FIELD_W)
+            mkColLbl("%",       COL_NUM_W + 80 + 4 + COL_FIELD_W + 2, COL_PCT_W)
 
-            -- ── Slot rows ─────────────────────────────────────
+            -- ── Slot rows ────────────────────────────────────
             local slotRefs = {}
             for si, slot in ipairs(chain.slots) do
-                local isCurrentSlot = planterChainsEnabled and chain.enabled and (si == chain.currentSlot)
+                local isActive = planterChainsEnabled and chain.enabled and (si == chain.currentSlot)
+                local capturedSi = si
 
-                local slotRow = Instance.new("Frame", chainCard)
-                slotRow.Size             = UDim2.new(1, 0, 0, 22)
-                slotRow.BackgroundColor3 = isCurrentSlot and Color3.fromRGB(0, 45, 25) or Color3.fromRGB(0,0,0)
-                slotRow.BackgroundTransparency = isCurrentSlot and 0 or 1
-                slotRow.BorderSizePixel  = 0
-                slotRow.LayoutOrder      = si + 2
-                Instance.new("UICorner", slotRow).CornerRadius = UDim.new(0, 4)
+                local row = Instance.new("Frame", card)
+                row.Size             = UDim2.new(1, 0, 0, 20)
+                row.BackgroundColor3 = Color3.fromRGB(0, 40, 22)
+                row.BackgroundTransparency = isActive and 0 or 1
+                row.BorderSizePixel  = 0
+                row.LayoutOrder      = si + 2
+                Instance.new("UICorner", row).CornerRadius = UDim.new(0, 3)
+                row.ClipsDescendants = true
 
-                -- slot index
-                local siLbl = Instance.new("TextLabel", slotRow)
-                siLbl.Size                 = UDim2.new(0, 10, 1, 0)
-                siLbl.Position             = UDim2.new(0, 0, 0, 0)
-                siLbl.BackgroundTransparency = 1
-                siLbl.Text                 = tostring(si)
-                siLbl.TextColor3           = isCurrentSlot and C.green or C.textDim
-                siLbl.Font                 = Enum.Font.GothamBold
-                siLbl.TextSize             = 8
-                siLbl.TextXAlignment       = Enum.TextXAlignment.Center
+                -- slot number
+                local numLbl = Instance.new("TextLabel", row)
+                numLbl.Size                 = UDim2.new(0, COL_NUM_W, 1, 0)
+                numLbl.Position             = UDim2.new(0, 0, 0, 0)
+                numLbl.BackgroundTransparency = 1
+                numLbl.Text                 = tostring(si)
+                numLbl.TextColor3           = isActive and C.green or C.textDim
+                numLbl.Font                 = Enum.Font.GothamBold
+                numLbl.TextSize             = 8
+                numLbl.TextXAlignment       = Enum.TextXAlignment.Center
+
+                -- ── All remaining columns use absolute pixel X ─
+                local x = COL_NUM_W + 2
+                local rowH = 18  -- content height inside 20px row
 
                 -- planter dropdown
-                local capturedSi = si
-                local capturedChainId2 = chain.id
-                local pBtn, getPName, setPName = mkCycleBtn(slotRow, PlanterNames, si*10)
-                pBtn.Size     = UDim2.new(0.36, -2, 1, -2)
-                pBtn.Position = UDim2.new(0, 12, 0, 1)
-                setPName(slot.planterName)
-                pBtn.MouseButton1Click:Connect(function()
-                    local _, ch = findChainById(capturedChainId2)
-                    if ch and ch.slots[capturedSi] then
-                        ch.slots[capturedSi].planterName = getPName()
-                    end
+                local planterW = 78
+                local pDrop, getPName = mkDropdown(row, PlanterNames, slot.planterName, x, 1, planterW, rowH)
+                pDrop.MouseButton1Click:Connect(function()
+                    local _, ch = findChainById(capturedId)
+                    if ch and ch.slots[capturedSi] then ch.slots[capturedSi].planterName = getPName() end
                 end)
+                x = x + planterW + 3
 
                 -- field dropdown
-                local fBtn, getFName, setFName = mkCycleBtn(slotRow, FieldOrder, si*10+1)
-                fBtn.Size     = UDim2.new(0.37, -2, 1, -2)
-                fBtn.Position = UDim2.new(0.38, 0, 0, 1)
-                setFName(slot.field)
-                fBtn.MouseButton1Click:Connect(function()
-                    local _, ch = findChainById(capturedChainId2)
-                    if ch and ch.slots[capturedSi] then
-                        ch.slots[capturedSi].field = getFName()
-                    end
+                local fDrop, getFName = mkDropdown(row, FieldOrder, slot.field, x, 1, COL_FIELD_W, rowH)
+                fDrop.MouseButton1Click:Connect(function()
+                    local _, ch = findChainById(capturedId)
+                    if ch and ch.slots[capturedSi] then ch.slots[capturedSi].field = getFName() end
                 end)
+                x = x + COL_FIELD_W + 3
 
-                -- % box
-                local pctBox = Instance.new("TextBox", slotRow)
-                pctBox.Size             = UDim2.new(0.12, -2, 1, -2)
-                pctBox.Position         = UDim2.new(0.75, 0, 0, 1)
+                -- % textbox
+                local pctBox = Instance.new("TextBox", row)
+                pctBox.Position         = UDim2.new(0, x, 0, 1)
+                pctBox.Size             = UDim2.new(0, COL_PCT_W, 0, rowH)
                 pctBox.BackgroundColor3 = C.bg
+                pctBox.BorderSizePixel  = 0
                 pctBox.Text             = tostring(slot.claimPct)
                 pctBox.TextColor3       = C.honey
                 pctBox.Font             = Enum.Font.GothamBold
-                pctBox.TextSize         = 9
-                pctBox.BorderSizePixel  = 0
+                pctBox.TextSize         = 8
                 Instance.new("UICorner", pctBox).CornerRadius = UDim.new(0, 3)
-                local pctPad = Instance.new("UIPadding", pctBox)
-                pctPad.PaddingLeft = UDim.new(0, 3)
+                local pp = Instance.new("UIPadding", pctBox)
+                pp.PaddingLeft = UDim.new(0, 3)
                 pctBox.FocusLost:Connect(function()
-                    local v = tonumber(pctBox.Text:match("[%d%.]+")) or 100
-                    v = math.clamp(v, 1, 100)
-                    local _, ch = findChainById(capturedChainId2)
-                    if ch and ch.slots[capturedSi] then
-                        ch.slots[capturedSi].claimPct = v
-                    end
+                    local v = math.clamp(tonumber(pctBox.Text:match("[%d%.]+")) or 100, 1, 100)
+                    local _, ch = findChainById(capturedId)
+                    if ch and ch.slots[capturedSi] then ch.slots[capturedSi].claimPct = v end
                     pctBox.Text = tostring(v)
                 end)
+                x = x + COL_PCT_W + 3
 
-                -- remove slot button
-                local delSlotBtn = Instance.new("TextButton", slotRow)
-                delSlotBtn.Size             = UDim2.new(0.12, 0, 1, -2)
-                delSlotBtn.Position         = UDim2.new(0.88, 0, 0, 1)
-                delSlotBtn.BackgroundTransparency = 1
-                delSlotBtn.BorderSizePixel  = 0
-                delSlotBtn.Text             = "✕"
-                delSlotBtn.TextColor3       = C.textDim
-                delSlotBtn.Font             = Enum.Font.GothamBold
-                delSlotBtn.TextSize         = 9
-                delSlotBtn.MouseButton1Click:Connect(function()
-                    local _, ch = findChainById(capturedChainId2)
+                -- ✕ remove slot
+                local delSlot = Instance.new("TextButton", row)
+                delSlot.Position         = UDim2.new(0, x, 0, 1)
+                delSlot.Size             = UDim2.new(0, COL_DEL_W, 0, rowH)
+                delSlot.BackgroundTransparency = 1
+                delSlot.BorderSizePixel  = 0
+                delSlot.Text             = "✕"
+                delSlot.TextColor3       = C.textDim
+                delSlot.Font             = Enum.Font.GothamBold
+                delSlot.TextSize         = 9
+                delSlot.MouseButton1Click:Connect(function()
+                    local _, ch = findChainById(capturedId)
                     if not ch or #ch.slots <= 1 then return end
                     table.remove(ch.slots, capturedSi)
                     if ch.currentSlot > #ch.slots then ch.currentSlot = 1 end
                     rebuildChainUI()
                 end)
 
-                table.insert(slotRefs, slotRow)
+                table.insert(slotRefs, row)
             end
 
-            table.insert(chainFrameRefs, chainCard)
-            chainUIRefs[ci] = { statusLbl = chainStatusLbl, slotRefs = slotRefs }
+            table.insert(chainFrameRefs, card)
+            chainUIRefs[ci] = { statusLbl = statusLbl, slotRefs = slotRefs }
         end
 
-        -- "Add Chain" button at the bottom
-        if #planterChains < 6 then
-            local addChainBtn = Instance.new("TextButton", chainOuterScroll)
-            addChainBtn.Size             = UDim2.new(1, 0, 0, 22)
-            addChainBtn.BackgroundColor3 = Color3.fromRGB(0, 40, 20)
-            addChainBtn.BorderSizePixel  = 0
-            addChainBtn.Text             = "+ Add Cycle"
-            addChainBtn.TextColor3       = C.green
-            addChainBtn.Font             = Enum.Font.GothamBold
-            addChainBtn.TextSize         = 11
-            addChainBtn.LayoutOrder      = #planterChains + 99
-            Instance.new("UICorner", addChainBtn).CornerRadius = UDim.new(0, 6)
-            addChainBtn.MouseButton1Click:Connect(function()
-                table.insert(planterChains, {
-                    id          = newChainId(),
-                    enabled     = false,
-                    slots       = {{ planterName=PlanterNames[1], field=FieldOrder[1], claimPct=100 }},
-                    currentSlot = 1,
-                    status      = "—",
-                })
-                rebuildChainUI()
-            end)
-            table.insert(chainFrameRefs, addChainBtn)
-        end
+        -- ── "+ Add Cycle" button — always present at bottom ────
+        local addCycleBtn = Instance.new("TextButton", chainOuterScroll)
+        addCycleBtn.Size             = UDim2.new(1, 0, 0, 24)
+        addCycleBtn.BackgroundColor3 = Color3.fromRGB(0, 38, 18)
+        addCycleBtn.BorderSizePixel  = 0
+        addCycleBtn.Text             = "+ Add Cycle"
+        addCycleBtn.TextColor3       = C.green
+        addCycleBtn.Font             = Enum.Font.GothamBold
+        addCycleBtn.TextSize         = 11
+        addCycleBtn.LayoutOrder      = 999
+        Instance.new("UICorner", addCycleBtn).CornerRadius = UDim.new(0, 5)
+        addCycleBtn.MouseButton1Click:Connect(function()
+            table.insert(planterChains, {
+                id          = newChainId(),
+                enabled     = false,
+                slots       = {{ planterName=PlanterNames[1], field=FieldOrder[1], claimPct=100 }},
+                currentSlot = 1,
+                status      = "—",
+            })
+            rebuildChainUI()
+        end)
+        table.insert(chainFrameRefs, addCycleBtn)
     end
 
     -- Master toggle logic
     masterToggleBtn.MouseButton1Click:Connect(function()
         planterChainsEnabled = not planterChainsEnabled
-        masterToggleBtn.Text             = planterChainsEnabled and "🌱 Auto-Plant: ON" or "🌱 Auto-Plant: OFF"
+        masterToggleBtn.Text             = planterChainsEnabled and "🌱 Auto-Plant: ON"  or "🌱 Auto-Plant: OFF"
         masterToggleBtn.BackgroundColor3 = planterChainsEnabled and C.greenDark or C.card
-        masterToggleBtn.TextColor3       = planterChainsEnabled and C.green or C.text
+        masterToggleBtn.TextColor3       = planterChainsEnabled and C.green     or C.text
         rebuildChainUI()
     end)
 
-    -- Expose to task
+    -- Expose to planter task
     UI.rebuildChainUI = rebuildChainUI
     UI.chainUIRefs    = chainUIRefs
 
-    -- Start empty — user adds cycles manually
-    rebuildChainUI()
+    rebuildChainUI()   -- draw initial state (just the "+ Add Cycle" button)
 
     -- ════════════════════════════════════════════════════════
     -- CFG TAB
