@@ -1668,11 +1668,10 @@ local function createUI()
     switchTab("FARM")
 end
 
-createUI()
-
--- Load saved planter config then refresh the PLANT tab
+-- Load saved planter config BEFORE building UI so first rebuildChainUI sees the data
 loadPlanterConfig()
-if UI.rebuildChainUI then UI.rebuildChainUI() end
+
+createUI()
 
 -- ============================================================
 -- 5. POLLEN WATCHER
