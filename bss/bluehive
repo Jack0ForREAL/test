@@ -1167,8 +1167,8 @@ local function createUI()
     local COL_FIELD_W = 80   -- field dropdown
     -- planter btn fills the rest
 
-    -- ── Helper: make a simple cycling dropdown (no LayoutOrder, no parent layout) ─
-    local function mkDropdown(parent, values, initVal, x, y, w, h)
+    -- ── Helper: cycling dropdown — onChange(newValue) called after cycle ─
+    local function mkDropdown(parent, values, initVal, x, y, w, h, onChange)
         local idx = 1
         for i, v in ipairs(values) do if v == initVal then idx = i; break end end
         local btn = Instance.new("TextButton", parent)
@@ -1189,8 +1189,9 @@ local function createUI()
         btn.MouseButton1Click:Connect(function()
             idx = (idx % #values) + 1
             btn.Text = values[idx]
+            if onChange then onChange(values[idx]) end
         end)
-        return btn, function() return values[idx] end
+        return btn
     end
 
     -- ── Chain card builder ────────────────────────────────────
@@ -1379,22 +1380,20 @@ local function createUI()
 
                 -- planter dropdown
                 local planterW = 78
-                local pDrop, getPName = mkDropdown(row, PlanterNames, slot.planterName, x, 1, planterW, rowH)
-                pDrop.MouseButton1Click:Connect(function()
+                mkDropdown(row, PlanterNames, slot.planterName, x, 1, planterW, rowH, function(val)
                     local _, ch = findChainById(capturedId)
                     if ch and ch.slots[capturedSi] then
-                        ch.slots[capturedSi].planterName = getPName()
+                        ch.slots[capturedSi].planterName = val
                         savePlanterConfig()
                     end
                 end)
                 x = x + planterW + 3
 
                 -- field dropdown
-                local fDrop, getFName = mkDropdown(row, FieldOrder, slot.field, x, 1, COL_FIELD_W, rowH)
-                fDrop.MouseButton1Click:Connect(function()
+                mkDropdown(row, FieldOrder, slot.field, x, 1, COL_FIELD_W, rowH, function(val)
                     local _, ch = findChainById(capturedId)
                     if ch and ch.slots[capturedSi] then
-                        ch.slots[capturedSi].field = getFName()
+                        ch.slots[capturedSi].field = val
                         savePlanterConfig()
                     end
                 end)
