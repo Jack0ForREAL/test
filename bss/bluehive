@@ -76,11 +76,15 @@ local Fields = {
     ["Pumpkin Patch"]     = calcField(Vector3.new(-255.686,67.753,-152.540),Vector3.new(-124.199,67.425,-219.453)),
     ["Mountain Top"]      = calcField(Vector3.new(28.013,175.982,-111.858), Vector3.new(123.606,175.924,-223.915)),
     ["Pineapple Patch"]   = calcField(Vector3.new(189.510,67.998,-164.074), Vector3.new(319.320,67.998,-254.283)),
+    ["Mushroom Field"]    = calcField(Vector3.new(-28,4,156),               Vector3.new(-156,4,64)),
+    ["Pepper Field"]      = calcField(Vector3.new(-448,123,480),            Vector3.new(-532,123,588)),
+    ["Coconut Field"]     = calcField(Vector3.new(-315,71,428),             Vector3.new(-196,72,508)),
 }
 local FieldOrder = {
     "Pine Tree Forest","Sunflower Field","Dandelion Field","Clover Field",
     "Blue Flower Field","Bamboo Field","Spider Field","Strawberry Field",
-    "Rose Field","Cactus Field","Pumpkin Patch","Mountain Top","Pineapple Patch"
+    "Rose Field","Cactus Field","Pumpkin Patch","Mountain Top","Pineapple Patch",
+    "Mushroom Field","Pepper Field","Coconut Field",
 }
 
 local Boosters = {
