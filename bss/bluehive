@@ -2423,14 +2423,15 @@ local function readBulbProgress(bulb)
     local tl = ga and ga:FindFirstChild("Planter Gui")
                and ga["Planter Gui"]:FindFirstChild("Bar")
                and ga["Planter Gui"].Bar:FindFirstChild("TextLabel")
-    if not tl then return nil, false, "" end
+    
+    if not tl then return "Unknown", 0 end
+    
     local txt = tl.Text
-    -- Text is e.g. "Blue Clay Planter (13%)" or "Ready!"
-    local pct = txt:match("%((%d+%.?%d*)%%%)")  -- prefer "(13%)" form
-    if not pct then pct = txt:match("(%d+%.?%d*)%%") end  -- fallback bare "13%"
-    local numPct = tonumber(pct)
-    local ready  = (numPct and numPct >= 100) or (txt:lower():find("ready") ~= nil)
-    return numPct, ready, txt
+    -- Extracts Name and Percentage (e.g., "Plastic Planter (50%)")
+    local name, pct = txt:match("^(.-)%s*%(?(%d+%.?%d*)%%?%)?$")
+    
+    local numPct = tonumber(pct) or 0
+    return (name or txt), numPct
 end
 
 -- (QuestionBox confirmation is handled inline inside the claim action)
@@ -2558,11 +2559,9 @@ local function watchChain(chainId)
     while _G.Running do
         task.wait(2)
 
-        -- Find this chain by id (index may have changed due to deletions)
         local ci, chain = findChainById(chainId)
-        if not chain then break end  -- chain was deleted, exit coroutine
+        if not chain then break end 
 
-        -- Master off or chain off
         if not planterChainsEnabled or not chain.enabled then
             setChainStatusById(chainId, "off")
             continue
@@ -2579,10 +2578,7 @@ local function watchChain(chainId)
             continue
         end
 
-        -- ── Sync currentSlot to reality ──────────────────────────
-        -- Scan ALL fields in this chain for a live bulb.
-        -- If found, set currentSlot to that slot so we always know
-        -- exactly where we are — even after restart or failed plant.
+        -- Sync logic
         local syncedSlot = nil
         for scanI, scanSlot in ipairs(slots) do
             if findBulbInField(scanSlot.field) then
@@ -2591,15 +2587,12 @@ local function watchChain(chainId)
             end
         end
         if syncedSlot then
-            -- There's a live bulb — work on that slot
             if chain.currentSlot ~= syncedSlot then
                 chain.currentSlot = syncedSlot
                 savePlanterConfig()
             end
         end
-        -- If no bulb found anywhere, currentSlot stays as-is (next to plant)
 
-        -- Clamp slot index
         if chain.currentSlot > #slots then chain.currentSlot = 1 end
         local si    = chain.currentSlot
         local slot  = slots[si]
@@ -2611,8 +2604,6 @@ local function watchChain(chainId)
             continue
         end
 
-        -- Check if this chain already has a pending action in the queue
-        -- or is currently being executed — avoid stacking duplicate actions
         local alreadyQueued = false
         for _, e in ipairs(planterActionQueue) do
             if e.chainId == chainId then alreadyQueued = true; break end
@@ -2622,16 +2613,14 @@ local function watchChain(chainId)
             continue
         end
 
-        -- Look for a bulb in this chain's current slot's field
         local bulb = findBulbInField(field)
 
         if not bulb then
-            -- No bulb — enqueue a PLACE action
+            -- PLACE action
             setChainStatusById(chainId, "needs planting")
             table.insert(planterActionQueue, {
                 chainId = chainId,
                 fn = function()
-                    -- Re-fetch chain in case it changed while queued
                     local _, ch = findChainById(chainId)
                     if not ch or not ch.enabled or not planterChainsEnabled then return end
                     local s = ch.slots[ch.currentSlot]
@@ -2645,7 +2634,6 @@ local function watchChain(chainId)
                         RepStorage.Events.PlayerActivesCommand:FireServer({ Name = s.planterName })
                     end)
 
-                    -- Wait up to 5 seconds to confirm bulb appeared
                     local planted = false
                     local t0 = tick()
                     repeat
@@ -2654,51 +2642,33 @@ local function watchChain(chainId)
                     until planted or tick() - t0 > 5
 
                     unanchor(); tpTo(fieldCenter())
-                    if planted then
-                        setChainStatusById(chainId, "growing")
-                    else
-                        -- Plant failed (game rejected it, wrong field, etc.)
-                        -- Don't advance slot — watcher will retry on next tick
-                        setChainStatusById(chainId, "plant failed — retrying")
-                    end
+                    if planted then setChainStatusById(chainId, "growing") else setChainStatusById(chainId, "plant failed") end
                 end
             })
-
         else
-            -- Bulb exists — read its progress
-            local pct, ready = readBulbProgress(bulb)
+            -- CLAIM action
+            local name, pct = readBulbProgress(bulb)
             local threshold  = slot.claimPct or 100
 
-            if ready or (pct and pct >= threshold) then
-                -- Enqueue a CLAIM+REPLANT action
+            -- PERCENTAGE ONLY TRIGGER
+            if pct >= threshold then
                 setChainStatusById(chainId, "ready to claim")
                 table.insert(planterActionQueue, {
                     chainId = chainId,
                     fn = function()
                         local _, ch = findChainById(chainId)
                         if not ch or not ch.enabled or not planterChainsEnabled then return end
-                        local s      = ch.slots[ch.currentSlot]
+                        local s = ch.slots[ch.currentSlot]
                         if not s then return end
-                        local fd     = Fields[s.field]
-                        if not fd then return end
-
-                        -- Re-check the bulb still exists
                         local b2 = findBulbInField(s.field)
-                        if not b2 then
-                            -- Already gone (another script/player claimed it?)
-                            setChainStatusById(chainId, "growing")
-                            return
-                        end
+                        if not b2 then setChainStatusById(chainId, "growing"); return end
 
                         setChainStatusById(chainId, "claiming…")
                         local _, hrp, hum = getChar()
                         tpTo(b2.Position); task.wait(1.5)
-
-                        -- Press E to interact with planter
                         pressE(); task.wait(0.5)
 
-                        -- Confirm early-claim dialog if it appears
-                        -- Poll for up to 3 seconds — ONLY press YesButton here
+                        -- Interaction Fix: QuestionBox -> Box -> YesButton
                         local t0 = tick()
                         local confirmed = false
                         repeat
@@ -2706,51 +2676,39 @@ local function watchChain(chainId)
                             local sg2 = getScreenGui()
                             local qb  = sg2 and sg2:FindFirstChild("QuestionBox")
                             if qb and qb.Visible then
-                                local box = qb:FindFirstChild ("Box")
+                                local box = qb:FindFirstChild("Box")
                                 local yesBtn = box and box:FindFirstChild("YesButton")
                                 if yesBtn and yesBtn:IsA("TextButton") then
+                                    task.wait(0.5) -- Buffer for UI
                                     if getconnections then
                                         for _, c in pairs(getconnections(yesBtn.MouseButton1Click)) do c:Fire() end
                                         for _, c in pairs(getconnections(yesBtn.Activated))         do c:Fire() end
                                     end
                                     confirmed = true
                                 end
-                                break
                             end
-                        until confirmed or tick() - t0 > 3
+                        until confirmed or tick() - t0 > 5
 
-                        -- Wait for the bulb to disappear (claim processed)
                         local waitForGone = tick()
                         repeat task.wait(0.3) until not findBulbInField(s.field) or tick() - waitForGone > 6
 
                         unanchor(); task.wait(0.5)
-
-                        -- Collect rewards
                         collectPlanterRewards(s.field, hrp, hum)
                         hum.WalkToPoint = hrp.Position
 
-                        -- Advance slot — watcher will see no bulb and enqueue a fresh plant
-                        local slots2 = ch.slots
-                        local nextSi = (ch.currentSlot % #slots2) + 1
-                        ch.currentSlot = nextSi
+                        ch.currentSlot = (ch.currentSlot % #ch.slots) + 1
                         savePlanterConfig()
 
                         unanchor(); tpTo(fieldCenter())
                         setChainStatusById(chainId, "growing")
-
-                        -- Refresh UI highlight for new active slot
                         if UI.rebuildChainUI then UI.rebuildChainUI() end
                     end
                 })
-
             else
-                -- Still growing — just update status, no action needed
-                local pctStr = pct and string.format("%.0f", pct) or "?"
-                setChainStatusById(chainId, pctStr.."% / "..threshold.."%")
+                setChainStatusById(chainId, name .. ": " .. pct .. "% / " .. threshold .. "%")
             end
         end
     end
-    -- Coroutine exiting (chain deleted) — clean up spawned set
     spawnedChainIds[chainId] = nil
 end
 
