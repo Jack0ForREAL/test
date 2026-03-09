@@ -368,13 +368,19 @@ end
 local BALLOON_SEARCH_RADIUS = 30
 
 local function findNearestBalloon(hPos)
+    local balloonsFolder = workspace:FindFirstChild("Balloons") and workspace.Balloons:FindFirstChild("HiveBalloons")
+    if not balloonsFolder then return nil end
+
     local best, bestDist = nil, BALLOON_SEARCH_RADIUS
-    local okD, desc = pcall(function() return workspace:GetDescendants() end)
-    if not okD or not desc then return nil end
-    for _, obj in ipairs(desc) do
-        if obj and obj.Parent and obj.Name == "BalloonBody" and obj:IsA("BasePart") then
-            local okP, d = pcall(function() return (obj.Position - hPos).Magnitude end)
-            if okP and d and d < bestDist then bestDist = d; best = obj end
+    
+    -- Using GetDescendants only on the specific folder instead of the whole Workspace
+    for _, obj in ipairs(balloonsFolder:GetDescendants()) do
+        if obj.Name == "BalloonBody" and obj:IsA("BasePart") then
+            local dist = (obj.Position - hPos).Magnitude
+            if dist < bestDist then
+                bestDist = dist
+                best = obj
+            end
         end
     end
     return best
@@ -2696,11 +2702,12 @@ local function watchChain(chainId)
                         local t0 = tick()
                         local confirmed = false
                         repeat
-                            task.wait(0.2)
+                            task.wait(0.3)
                             local sg2 = getScreenGui()
                             local qb  = sg2 and sg2:FindFirstChild("QuestionBox")
                             if qb and qb.Visible then
-                                local yesBtn = qb:FindFirstChild("YesButton")
+                                local box = qb:FindFirstChild ("Box")
+                                local yesBtn = box and box:FindFirstChild("YesButton")
                                 if yesBtn and yesBtn:IsA("TextButton") then
                                     if getconnections then
                                         for _, c in pairs(getconnections(yesBtn.MouseButton1Click)) do c:Fire() end
