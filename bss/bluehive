@@ -152,6 +152,14 @@ local totalPlanterRewards= {}
 -- Up to 3 chains run in parallel. Each chain independently watches its own bulb.
 local planterChains     = {}   -- array of chain tables
 local planterChainsEnabled = false  -- master on/off
+
+-- Early convert settings
+local earlyConvertEnabled   = false
+local earlyConvertInterval  = 4 * 3600  -- seconds of actual farming before triggering
+local earlyConvertDuration  = 8 * 60    -- seconds to spend in field per visit
+local earlyConvertAccum     = 0         -- accumulated active farming seconds
+local earlyConvertLastTick  = 0         -- last tick() when we incremented accum
+local earlyConvertActive    = false     -- currently in an early-convert field visit
 -- List of valid planter names for the dropdown
 local PlanterNames = {
     "Plastic Planter",
@@ -1532,6 +1540,19 @@ local function createUI()
     local scaleBox = mkTextBox(cfgRight, "0.4 – 2.5", 2)
     scaleBox.Text = "1.0"
 
+    mkDivider(cfgRight, 3)
+    mkHeader(cfgRight, "⏱ EARLY CONVERT", 4)
+    local earlyConvertBtn = mkButton(cfgRight, "Early Convert: OFF", C.card, 5, 24)
+    earlyConvertBtn.TextSize = 10
+    mkLabel(cfgRight, "Farm interval (e.g. 4h, 30m):", C.textDim, 6, 13)
+    local earlyIntervalBox = mkTextBox(cfgRight, "4h", 7)
+    earlyIntervalBox.Text = "4h"
+    mkLabel(cfgRight, "Field visit duration (e.g. 8m):", C.textDim, 8, 13)
+    local earlyDurationBox = mkTextBox(cfgRight, "8m", 9)
+    earlyDurationBox.Text = "8m"
+    local earlyStatusLbl = mkLabel(cfgRight, "  Inactive", Color3.fromRGB(100,150,100), 10, 13)
+    earlyStatusLbl.TextSize = 9
+
     -- CFG logic
     bloomBtn.MouseButton1Click:Connect(function()
         collectBlooms             = not collectBlooms
@@ -1560,6 +1581,43 @@ local function createUI()
         local v = tonumber(scaleBox.Text:match("[%d%.]+"))
         if v then uiScale.Scale = math.clamp(v, 0.4, 2.5) end
     end)
+
+    local function parseTime(txt)
+        txt = txt:lower():gsub("%s","")
+        local n = tonumber(txt:match("[%d%.]+"))
+        if not n then return nil end
+        if txt:find("h") then return n * 3600
+        elseif txt:find("m") then return n * 60
+        else return n end
+    end
+
+    earlyConvertBtn.MouseButton1Click:Connect(function()
+        earlyConvertEnabled              = not earlyConvertEnabled
+        earlyConvertBtn.Text             = earlyConvertEnabled and "Early Convert: ON" or "Early Convert: OFF"
+        earlyConvertBtn.BackgroundColor3 = earlyConvertEnabled and C.greenDark or C.card
+        if earlyConvertEnabled then
+            earlyConvertAccum    = 0
+            earlyConvertLastTick = tick()
+            earlyStatusLbl.Text      = "  Armed — next in "..earlyIntervalBox.Text
+            earlyStatusLbl.TextColor3 = C.green
+        else
+            earlyStatusLbl.Text      = "  Inactive"
+            earlyStatusLbl.TextColor3 = Color3.fromRGB(100,150,100)
+        end
+    end)
+
+    earlyIntervalBox.FocusLost:Connect(function()
+        local v = parseTime(earlyIntervalBox.Text)
+        if v then earlyConvertInterval = v end
+    end)
+
+    earlyDurationBox.FocusLost:Connect(function()
+        local v = parseTime(earlyDurationBox.Text)
+        if v then earlyConvertDuration = v end
+    end)
+
+    -- Expose label so the task can update it
+    UI.earlyStatusLbl = earlyStatusLbl
 
     -- ── Start/Stop button logic ───────────────────────────────
     startBtn.MouseButton1Click:Connect(function()
@@ -2515,6 +2573,26 @@ local function watchChain(chainId)
             continue
         end
 
+        -- ── Sync currentSlot to reality ──────────────────────────
+        -- Scan ALL fields in this chain for a live bulb.
+        -- If found, set currentSlot to that slot so we always know
+        -- exactly where we are — even after restart or failed plant.
+        local syncedSlot = nil
+        for scanI, scanSlot in ipairs(slots) do
+            if findBulbInField(scanSlot.field) then
+                syncedSlot = scanI
+                break
+            end
+        end
+        if syncedSlot then
+            -- There's a live bulb — work on that slot
+            if chain.currentSlot ~= syncedSlot then
+                chain.currentSlot = syncedSlot
+                savePlanterConfig()
+            end
+        end
+        -- If no bulb found anywhere, currentSlot stays as-is (next to plant)
+
         -- Clamp slot index
         if chain.currentSlot > #slots then chain.currentSlot = 1 end
         local si    = chain.currentSlot
@@ -2560,9 +2638,23 @@ local function watchChain(chainId)
                     pcall(function()
                         RepStorage.Events.PlayerActivesCommand:FireServer({ Name = s.planterName })
                     end)
-                    task.wait(2)
+
+                    -- Wait up to 5 seconds to confirm bulb appeared
+                    local planted = false
+                    local t0 = tick()
+                    repeat
+                        task.wait(0.5)
+                        planted = findBulbInField(s.field) ~= nil
+                    until planted or tick() - t0 > 5
+
                     unanchor(); tpTo(fieldCenter())
-                    setChainStatusById(chainId, "growing")
+                    if planted then
+                        setChainStatusById(chainId, "growing")
+                    else
+                        -- Plant failed (game rejected it, wrong field, etc.)
+                        -- Don't advance slot — watcher will retry on next tick
+                        setChainStatusById(chainId, "plant failed — retrying")
+                    end
                 end
             })
 
@@ -2594,7 +2686,7 @@ local function watchChain(chainId)
 
                         setChainStatusById(chainId, "claiming…")
                         local _, hrp, hum = getChar()
-                        tpTo(b2.Position); anchor(); task.wait(1.5)
+                        tpTo(b2.Position); task.wait(1.5)
 
                         -- Press E to interact with planter
                         pressE(); task.wait(0.5)
@@ -2935,6 +3027,96 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
 
     lastHRPPos = hrp.Position
 end))
+
+-- ============================================================
+-- 14.5. EARLY CONVERT TASK
+-- ============================================================
+-- Tracks accumulated active farming time (pauses during booster/planter/MM).
+-- After earlyConvertInterval seconds of real farming, does a short field visit
+-- of up to earlyConvertDuration seconds (or until cap fills), then converts.
+task.spawn(function()
+    while _G.Running do
+        task.wait(1)
+
+        if not isFarming or not earlyConvertEnabled or earlyConvertActive then
+            -- Pause accumulator while not farming
+            earlyConvertLastTick = tick()
+            continue
+        end
+
+        -- Check if anything is blocking right now
+        local blocked = isConverting or activeBooster or isCheckingBoosters
+                     or isSolvingMM  or isClaimingPlanter or warnDisks.processing
+
+        local now = tick()
+        if not blocked then
+            -- Accumulate only unblocked farming time
+            earlyConvertAccum = earlyConvertAccum + (now - earlyConvertLastTick)
+        end
+        earlyConvertLastTick = now
+
+        local remaining = earlyConvertInterval - earlyConvertAccum
+
+        if remaining > 0 then
+            -- Update status label
+            if UI.earlyStatusLbl then
+                local m = math.floor(remaining / 60)
+                local s = math.floor(remaining % 60)
+                UI.earlyStatusLbl.Text       = string.format("  Next in %d:%02d", m, s)
+                UI.earlyStatusLbl.TextColor3 = Color3.fromRGB(100, 150, 100)
+            end
+            continue
+        end
+
+        -- Interval elapsed — wait for any current blocking action to finish
+        local waitBlock = tick()
+        while (isConverting or activeBooster or isCheckingBoosters
+               or isSolvingMM or isClaimingPlanter or warnDisks.processing)
+              and tick() - waitBlock < 60 do
+            task.wait(0.5)
+        end
+
+        -- Start visit
+        earlyConvertActive   = true
+        earlyConvertAccum    = 0
+        earlyConvertLastTick = tick()
+
+        if UI.earlyStatusLbl then
+            UI.earlyStatusLbl.Text       = "  In field…"
+            UI.earlyStatusLbl.TextColor3 = C.green
+        end
+
+        tpTo(fieldCenter())
+        local visitStart = tick()
+
+        while _G.Running and isFarming and earlyConvertEnabled do
+            task.wait(0.5)
+            if LP.CoreStats.Pollen.Value >= LP.CoreStats.Capacity.Value then break end
+            if tick() - visitStart >= earlyConvertDuration then break end
+            if isConverting or activeBooster or isCheckingBoosters
+               or isSolvingMM or isClaimingPlanter then break end
+        end
+
+        -- Trigger conversion
+        if isFarming then
+            isConverting = true
+        end
+
+        -- Wait for conversion to finish
+        local waitConvert = tick()
+        while isConverting and tick() - waitConvert < 120 do
+            task.wait(1)
+        end
+
+        earlyConvertActive   = false
+        earlyConvertLastTick = tick()
+
+        if UI.earlyStatusLbl then
+            UI.earlyStatusLbl.Text       = "  Done — armed"
+            UI.earlyStatusLbl.TextColor3 = C.green
+        end
+    end
+end)
 
 -- ============================================================
 -- 15. WEBHOOK (5 min)
