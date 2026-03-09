@@ -2361,10 +2361,15 @@ local function readBulbProgress(bulb)
                and ga["Planter Gui"].Bar:FindFirstChild("TextLabel")
     if not tl then return nil, false, "" end
     local txt = tl.Text
-    local pct = txt:match("(%d+%.?%d*)%%")
-    local ready = (pct and tonumber(pct) >= 100) or (txt:lower():find("ready") ~= nil)
-    return tonumber(pct), ready, txt
+    -- Text is e.g. "Blue Clay Planter (13%)" or "Ready!"
+    local pct = txt:match("%((%d+%.?%d*)%%%)")  -- prefer "(13%)" form
+    if not pct then pct = txt:match("(%d+%.?%d*)%%") end  -- fallback bare "13%"
+    local numPct = tonumber(pct)
+    local ready  = (numPct and numPct >= 100) or (txt:lower():find("ready") ~= nil)
+    return numPct, ready, txt
 end
+
+-- (QuestionBox confirmation is handled inline inside the claim action)
 
 local function findBulbInField(fieldName)
     local pFolder = workspace:FindFirstChild("Planters")
@@ -2523,18 +2528,13 @@ local function watchChain(chainId)
         end
 
         -- Check if this chain already has a pending action in the queue
-        -- (avoid stacking duplicate actions)
+        -- or is currently being executed — avoid stacking duplicate actions
         local alreadyQueued = false
         for _, e in ipairs(planterActionQueue) do
             if e.chainId == chainId then alreadyQueued = true; break end
         end
-        if alreadyQueued then
+        if alreadyQueued or planterQueueRunning then
             setChainStatusById(chainId, "queued")
-            continue
-        end
-
-        -- Also skip if the executor is currently running THIS chain's action
-        if planterQueueRunning and planterActionQueue[1] and planterActionQueue[1].chainId == chainId then
             continue
         end
 
@@ -2595,38 +2595,47 @@ local function watchChain(chainId)
                         setChainStatusById(chainId, "claiming…")
                         local _, hrp, hum = getChar()
                         tpTo(b2.Position); anchor(); task.wait(1.5)
-                        pressE(); unanchor(); task.wait(3)
+
+                        -- Press E to interact with planter
+                        pressE(); task.wait(0.5)
+
+                        -- Confirm early-claim dialog if it appears
+                        -- Poll for up to 3 seconds — ONLY press YesButton here
+                        local t0 = tick()
+                        local confirmed = false
+                        repeat
+                            task.wait(0.2)
+                            local sg2 = getScreenGui()
+                            local qb  = sg2 and sg2:FindFirstChild("QuestionBox")
+                            if qb and qb.Visible then
+                                local yesBtn = qb:FindFirstChild("YesButton")
+                                if yesBtn and yesBtn:IsA("TextButton") then
+                                    if getconnections then
+                                        for _, c in pairs(getconnections(yesBtn.MouseButton1Click)) do pcall(c.Fire, c) end
+                                    else
+                                        yesBtn:Fire("MouseButton1Click")
+                                    end
+                                    confirmed = true
+                                end
+                                break
+                            end
+                        until confirmed or tick() - t0 > 3
+
+                        -- Wait for the bulb to disappear (claim processed)
+                        local waitForGone = tick()
+                        repeat task.wait(0.3) until not findBulbInField(s.field) or tick() - waitForGone > 6
+
+                        unanchor(); task.wait(0.5)
 
                         -- Collect rewards
                         collectPlanterRewards(s.field, hrp, hum)
                         hum.WalkToPoint = hrp.Position
 
-                        -- Advance slot
-                        local slots2  = ch.slots
-                        local nextSi  = (ch.currentSlot % #slots2) + 1
+                        -- Advance slot — watcher will see no bulb and enqueue a fresh plant
+                        local slots2 = ch.slots
+                        local nextSi = (ch.currentSlot % #slots2) + 1
                         ch.currentSlot = nextSi
                         savePlanterConfig()
-                        local ns      = slots2[nextSi]
-                        local nfd     = ns and Fields[ns.field]
-
-                        -- Plant next slot's planter
-                        if ns and nfd then
-                            if ns.field == s.field then
-                                -- Same field, plant here
-                                tpTo(b2.Position); anchor(); task.wait(1)
-                                pcall(function()
-                                    RepStorage.Events.PlayerActivesCommand:FireServer({ Name = ns.planterName })
-                                end)
-                                task.wait(2)
-                            else
-                                -- Different field
-                                tpTo(nfd.center); anchor(); task.wait(1.5)
-                                pcall(function()
-                                    RepStorage.Events.PlayerActivesCommand:FireServer({ Name = ns.planterName })
-                                end)
-                                task.wait(2)
-                            end
-                        end
 
                         unanchor(); tpTo(fieldCenter())
                         setChainStatusById(chainId, "growing")
