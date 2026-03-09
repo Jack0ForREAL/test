@@ -2703,9 +2703,8 @@ local function watchChain(chainId)
                                 local yesBtn = qb:FindFirstChild("YesButton")
                                 if yesBtn and yesBtn:IsA("TextButton") then
                                     if getconnections then
-                                        for _, c in pairs(getconnections(yesBtn.MouseButton1Click)) do pcall(c.Fire, c) end
-                                    else
-                                        yesBtn:Fire("MouseButton1Click")
+                                        for _, c in pairs(getconnections(yesBtn.MouseButton1Click)) do c:Fire() end
+                                        for _, c in pairs(getconnections(yesBtn.Activated))         do c:Fire() end
                                     end
                                     confirmed = true
                                 end
