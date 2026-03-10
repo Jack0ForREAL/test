@@ -153,6 +153,9 @@ local totalPlanterRewards= {}
 local planterChains     = {}   -- array of chain tables
 local planterChainsEnabled = false  -- master on/off
 
+-- Conversion reason tracking
+local lastConvertReason     = "—"
+
 -- Early convert settings
 local earlyConvertEnabled   = false
 local earlyConvertInterval  = 4 * 3600  -- seconds of actual farming before triggering
@@ -160,6 +163,7 @@ local earlyConvertDuration  = 8 * 60    -- seconds to spend in field per visit
 local earlyConvertAccum     = 0         -- accumulated active farming seconds
 local earlyConvertLastTick  = 0         -- last tick() when we incremented accum
 local earlyConvertActive    = false     -- currently in an early-convert field visit
+local earlyVisitStart       = 0         -- tick() when current visit started (for countdown)
 -- List of valid planter names for the dropdown
 local PlanterNames = {
     "Plastic Planter",
@@ -1558,6 +1562,13 @@ local function createUI()
     earlyDurationBox.Text = "8m"
     local earlyStatusLbl = mkLabel(cfgRight, "  Inactive", Color3.fromRGB(100,150,100), 10, 13)
     earlyStatusLbl.TextSize = 9
+    local earlyVisitLbl = mkLabel(cfgRight, "", Color3.fromRGB(80, 180, 255), 11, 13)
+    earlyVisitLbl.TextSize = 9
+    mkDivider(cfgRight, 12)
+    mkLabel(cfgRight, "Last convert reason:", C.textDim, 13, 13)
+    local convertReasonLbl = mkLabel(cfgRight, "  —", Color3.fromRGB(200, 160, 80), 14, 13)
+    convertReasonLbl.TextSize = 9
+    convertReasonLbl.TextWrapped = true
 
     -- CFG logic
     bloomBtn.MouseButton1Click:Connect(function()
@@ -1623,7 +1634,9 @@ local function createUI()
     end)
 
     -- Expose label so the task can update it
-    UI.earlyStatusLbl = earlyStatusLbl
+    UI.earlyStatusLbl   = earlyStatusLbl
+    UI.earlyVisitLbl    = earlyVisitLbl
+    UI.convertReasonLbl = convertReasonLbl
 
     -- ── Start/Stop button logic ───────────────────────────────
     startBtn.MouseButton1Click:Connect(function()
@@ -2210,6 +2223,38 @@ task.spawn(function()
             UI.total.Text = fmt(honey)
             UI.time.Text  = os.date("!%X", elapsed)
             if UI.fieldLbl then UI.fieldLbl.Text = currentField end
+
+            -- Early convert live countdown
+            if UI.earlyStatusLbl and earlyConvertEnabled then
+                if earlyConvertActive then
+                    -- Visit in progress — show countdown
+                    local visitElapsed = earlyVisitStart > 0 and (now - earlyVisitStart) or 0
+                    local visitLeft    = math.max(0, earlyConvertDuration - visitElapsed)
+                    local vm = math.floor(visitLeft / 60)
+                    local vs = math.floor(visitLeft % 60)
+                    UI.earlyStatusLbl.Text       = "  In field…"
+                    UI.earlyStatusLbl.TextColor3 = C.green
+                    if UI.earlyVisitLbl then
+                        UI.earlyVisitLbl.Text       = string.format("  Visit ends in %d:%02d", vm, vs)
+                        UI.earlyVisitLbl.TextColor3 = Color3.fromRGB(80, 180, 255)
+                    end
+                else
+                    -- Waiting for interval — show countdown to next visit
+                    local remaining = math.max(0, earlyConvertInterval - earlyConvertAccum)
+                    local rm = math.floor(remaining / 60)
+                    local rs = math.floor(remaining % 60)
+                    UI.earlyStatusLbl.Text       = string.format("  Next in %d:%02d", rm, rs)
+                    UI.earlyStatusLbl.TextColor3 = Color3.fromRGB(100, 150, 100)
+                    if UI.earlyVisitLbl then
+                        UI.earlyVisitLbl.Text = ""
+                    end
+                end
+            end
+
+            -- Last convert reason
+            if UI.convertReasonLbl then
+                UI.convertReasonLbl.Text = "  " .. lastConvertReason
+            end
             -- Quick stats on farm tab
             if UI.qhS  then UI.qhS.Text  = fmt(dHPS) end
             if UI.qhH  then UI.qhH.Text  = fmt(dHPS*3600) end
@@ -2717,20 +2762,19 @@ task.spawn(function()
     while _G.Running do
         task.wait(2)
         local pFolder = workspace:FindFirstChild("Planters")
-        if not pFolder then continue end
-        local seen = {}
-        for _, bulb in ipairs(pFolder:GetChildren()) do
-            if bulb.Name ~= "PlanterBulb" then continue end
-            local pct, _, txt = readBulbProgress(bulb)
-            local displayName = (txt ~= "" and (txt:match("^(.-) %(") or txt:match("^(.-)%s*$"))) or "?"
-            if #displayName > 24 then displayName = displayName:sub(1,22).."…" end
-            local progStr = pct and string.format("%.0f%%", pct) or (txt:lower():find("ready") and "Ready" or "?")
-            planterProgress[displayName] = progStr
-            seen[displayName] = true
+        local newProgress = {}
+        if pFolder then
+            for _, bulb in ipairs(pFolder:GetChildren()) do
+                if bulb.Name ~= "PlanterBulb" then continue end
+                local name, pct = readBulbProgress(bulb)
+                local displayName = name or "?"
+                if #displayName > 24 then displayName = displayName:sub(1,22).."…" end
+                local progStr = string.format("%.0f%%", pct)
+                newProgress[displayName] = progStr
+            end
         end
-        for k in pairs(planterProgress) do
-            if not seen[k] then planterProgress[k] = nil end
-        end
+        -- Replace entire table so removed planters disappear
+        planterProgress = newProgress
     end
 end)
 
@@ -2790,7 +2834,8 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
             waitingForBees=true; fullBagTime=tick()
             if tick()-lastEmptied<5 then quickRefill+=1 else quickRefill=0 end
         end
-        if quickRefill>=5 or tick()-fullBagTime>=5 then
+        if quickRefill>=10 or tick()-fullBagTime>=5 then
+            lastConvertReason = quickRefill>=10 and "Pollen cap (quick refill x10)" or "Pollen cap (5s wait)"
             isConverting=true; waitingForBees=false; quickRefill=0
         end
         return
@@ -3044,6 +3089,7 @@ task.spawn(function()
         earlyConvertActive   = true
         earlyConvertAccum    = 0
         earlyConvertLastTick = tick()
+        earlyVisitStart      = tick()
 
         if UI.earlyStatusLbl then
             UI.earlyStatusLbl.Text       = "  In field…"
@@ -3053,32 +3099,47 @@ task.spawn(function()
         tpTo(fieldCenter())
         local visitStart = tick()
 
+        -- Wait out the field visit duration. Farming runs completely normally
+        -- during this time (pollen cap rules, boosters, MM, planters all work
+        -- as usual). The ONLY thing early convert adds is a hard deadline:
+        -- after earlyConvertDuration seconds we force a convert so balloon
+        -- pollen isn't lost. We don't touch isConverting ourselves here —
+        -- normal rules handle it. We just watch for the deadline or for a
+        -- normal conversion to have already started.
         while _G.Running and isFarming and earlyConvertEnabled do
             task.wait(0.5)
-            if LP.CoreStats.Pollen.Value >= LP.CoreStats.Capacity.Value then break end
-            if tick() - visitStart >= earlyConvertDuration then break end
-            if isConverting or activeBooster or isCheckingBoosters
-               or isSolvingMM or isClaimingPlanter then break end
+
+            -- Normal conversion already triggered by pollen cap rules — let it run
+            if isConverting then
+                break
+            end
+
+            -- Hard deadline reached
+            if tick() - visitStart >= earlyConvertDuration then
+                -- Wait politely for any active booster/MM/planter to finish (up to 60s)
+                local waitBlock = tick()
+                while (activeBooster or isCheckingBoosters or isSolvingMM or isClaimingPlanter)
+                      and tick() - waitBlock < 60 do
+                    task.wait(0.5)
+                end
+                if isFarming and not isConverting then
+                    lastConvertReason = "Early convert (hard cap reached)"
+                    isConverting = true
+                end
+                break
+            end
         end
 
-        -- Trigger conversion
-        if isFarming then
-            isConverting = true
-        end
-
-        -- Wait for conversion to finish
+        -- Wait for conversion to finish before resetting state
         local waitConvert = tick()
         while isConverting and tick() - waitConvert < 120 do
             task.wait(1)
         end
 
         earlyConvertActive   = false
+        earlyVisitStart      = 0
         earlyConvertLastTick = tick()
 
-        if UI.earlyStatusLbl then
-            UI.earlyStatusLbl.Text       = "  Done — armed"
-            UI.earlyStatusLbl.TextColor3 = C.green
-        end
     end
 end)
 
