@@ -699,12 +699,22 @@ local function createUI()
 
     -- ── AutoSize polyfills for exploit compatibility ─────────
     local function bindAutoY(frame, lay, padY)
-        local function update() frame.Size = UDim2.new(1, 0, 0, lay.AbsoluteContentSize.Y + (padY or 0)) end
+        local function update()
+            local ok, err = pcall(function()
+                frame.Size = UDim2.new(frame.Size.X.Scale, frame.Size.X.Offset, 0, lay.AbsoluteContentSize.Y + (padY or 0))
+            end)
+            if not ok then warn("[BlueHive UI Error] bindAutoY: " .. tostring(err)) end
+        end
         lay:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(update)
         task.defer(update)
     end
     local function bindSplitY(split, layL, layR)
-        local function update() split.Size = UDim2.new(1, 0, 0, math.max(layL.AbsoluteContentSize.Y, layR.AbsoluteContentSize.Y)) end
+        local function update()
+            local ok, err = pcall(function()
+                split.Size = UDim2.new(split.Size.X.Scale, split.Size.X.Offset, 0, math.max(layL.AbsoluteContentSize.Y, layR.AbsoluteContentSize.Y))
+            end)
+            if not ok then warn("[BlueHive UI Error] bindSplitY: " .. tostring(err)) end
+        end
         layL:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(update)
         layR:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(update)
         task.defer(update)
