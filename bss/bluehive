@@ -697,6 +697,19 @@ local function createUI()
     content.BackgroundTransparency = 1
     content.ClipsDescendants   = true
 
+    -- ── AutoSize polyfills for exploit compatibility ─────────
+    local function bindAutoY(frame, lay, padY)
+        local function update() frame.Size = UDim2.new(1, 0, 0, lay.AbsoluteContentSize.Y + (padY or 0)) end
+        lay:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(update)
+        task.defer(update)
+    end
+    local function bindSplitY(split, layL, layR)
+        local function update() split.Size = UDim2.new(1, 0, 0, math.max(layL.AbsoluteContentSize.Y, layR.AbsoluteContentSize.Y)) end
+        layL:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(update)
+        layR:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(update)
+        task.defer(update)
+    end
+
     -- ── Tab system ───────────────────────────────────────────
     local tabFrames, tabBtns, activeIndicators = {}, {}, {}
     local tabNames = { "FARM", "STATS", "BOOST", "PLANT", "CFG" }
@@ -754,6 +767,12 @@ local function createUI()
         pad.PaddingLeft  = UDim.new(0, 4)
         pad.PaddingRight = UDim.new(0, 4)
         pad.PaddingTop   = UDim.new(0, 3)
+        pad.PaddingBottom = UDim.new(0, 15)
+        
+        lay:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+            sf.CanvasSize = UDim2.new(0, 0, 0, lay.AbsoluteContentSize.Y + 18)
+        end)
+
         tabFrames[tname] = sf
         btn.MouseButton1Click:Connect(function() switchTab(tname) end)
     end
@@ -855,10 +874,9 @@ local function createUI()
     end
 
     -- Stat card: compact card with list layout
-    local function mkStatCard(parent, order, h)
+    local function mkStatCard(parent, order)
         local card = Instance.new("Frame", parent)
         card.Size             = UDim2.new(1, 0, 0, 0)
-        card.AutomaticSize    = Enum.AutomaticSize.Y
         card.BackgroundColor3 = C.card
         card.BorderSizePixel  = 0
         card.LayoutOrder      = order or 0
@@ -866,10 +884,13 @@ local function createUI()
         local lay = Instance.new("UIListLayout", card)
         lay.FillDirection = Enum.FillDirection.Vertical
         lay.Padding       = UDim.new(0, 2)
+        lay.SortOrder     = Enum.SortOrder.LayoutOrder
         local pad = Instance.new("UIPadding", card)
-        pad.PaddingLeft  = UDim.new(0, 7)
-        pad.PaddingTop   = UDim.new(0, 5)
-        pad.PaddingRight = UDim.new(0, 7)
+        pad.PaddingLeft   = UDim.new(0, 7)
+        pad.PaddingTop    = UDim.new(0, 5)
+        pad.PaddingRight  = UDim.new(0, 7)
+        pad.PaddingBottom = UDim.new(0, 5)
+        bindAutoY(card, lay, 10)
         return card
     end
 
@@ -881,7 +902,6 @@ local function createUI()
     -- We use a horizontal split frame so controls sit left and field list right
     local farmSplit = Instance.new("Frame", farm)
     farmSplit.Size             = UDim2.new(1, 0, 0, 0)
-    farmSplit.AutomaticSize    = Enum.AutomaticSize.Y
     farmSplit.BackgroundTransparency = 1
     farmSplit.BorderSizePixel  = 0
     farmSplit.LayoutOrder      = 1
@@ -889,7 +909,6 @@ local function createUI()
     -- Left column (start btn + status)
     local farmLeft = Instance.new("Frame", farmSplit)
     farmLeft.Size             = UDim2.new(0.52, -4, 0, 0)
-    farmLeft.AutomaticSize    = Enum.AutomaticSize.Y
     farmLeft.Position         = UDim2.new(0, 0, 0, 0)
     farmLeft.BackgroundTransparency = 1
     farmLeft.BorderSizePixel  = 0
@@ -900,13 +919,16 @@ local function createUI()
     -- Right column (field selector)
     local farmRight = Instance.new("Frame", farmSplit)
     farmRight.Size             = UDim2.new(0.48, -2, 0, 0)
-    farmRight.AutomaticSize    = Enum.AutomaticSize.Y
     farmRight.Position         = UDim2.new(0.52, 4, 0, 0)
     farmRight.BackgroundTransparency = 1
     farmRight.BorderSizePixel  = 0
     local farmRightLay = Instance.new("UIListLayout", farmRight)
     farmRightLay.Padding = UDim.new(0, 3)
     farmRightLay.SortOrder = Enum.SortOrder.LayoutOrder
+
+    bindAutoY(farmLeft, farmLeftLay)
+    bindAutoY(farmRight, farmRightLay)
+    bindSplitY(farmSplit, farmLeftLay, farmRightLay)
 
     -- ── Left: Start/Stop ─────────────────────────────────────
     local startBtn = Instance.new("TextButton", farmLeft)
@@ -960,7 +982,6 @@ local function createUI()
     -- Honey/Pollen quick stats on left
     local quickStats = Instance.new("Frame", farmLeft)
     quickStats.Size             = UDim2.new(1, 0, 0, 0)
-    quickStats.AutomaticSize    = Enum.AutomaticSize.Y
     quickStats.BackgroundColor3 = C.card
     quickStats.BorderSizePixel  = 0
     quickStats.LayoutOrder      = 3
@@ -969,7 +990,8 @@ local function createUI()
     qsLay.Padding   = UDim.new(0, 2)
     qsLay.SortOrder = Enum.SortOrder.LayoutOrder
     local qsPad = Instance.new("UIPadding", quickStats)
-    qsPad.PaddingLeft = UDim.new(0, 8); qsPad.PaddingTop = UDim.new(0, 5); qsPad.PaddingRight = UDim.new(0, 8)
+    qsPad.PaddingLeft = UDim.new(0, 8); qsPad.PaddingTop = UDim.new(0, 5); qsPad.PaddingRight = UDim.new(0, 8); qsPad.PaddingBottom = UDim.new(0, 5)
+    bindAutoY(quickStats, qsLay, 10)
 
     local qhS  = mkStatRow(quickStats, "H/s",    C.honey)
     local qhH  = mkStatRow(quickStats, "H/hour",  C.honey)
@@ -980,14 +1002,10 @@ local function createUI()
     -- ── Right: Field selector ────────────────────────────────
     local fHdr = mkHeader(farmRight, "FIELD", 1)
 
-    local fieldScroll = Instance.new("ScrollingFrame", farmRight)
-    fieldScroll.Size                  = UDim2.new(1, 0, 0, CONTENT_H - 30)
+    local fieldScroll = Instance.new("Frame", farmRight)
+    fieldScroll.Size                  = UDim2.new(1, 0, 0, 0)
     fieldScroll.BackgroundColor3      = C.card
     fieldScroll.BorderSizePixel       = 0
-    fieldScroll.ScrollBarThickness    = 3
-    fieldScroll.ScrollBarImageColor3  = C.accentDim
-    fieldScroll.AutomaticCanvasSize   = Enum.AutomaticSize.Y
-    fieldScroll.CanvasSize            = UDim2.new(0, 0, 0, 0)
     fieldScroll.LayoutOrder           = 2
     Instance.new("UICorner", fieldScroll).CornerRadius = UDim.new(0, 6)
     local fsLay = Instance.new("UIListLayout", fieldScroll)
@@ -995,6 +1013,7 @@ local function createUI()
     local fsPad = Instance.new("UIPadding", fieldScroll)
     fsPad.PaddingLeft = UDim.new(0, 3); fsPad.PaddingRight = UDim.new(0, 3)
     fsPad.PaddingTop  = UDim.new(0, 3); fsPad.PaddingBottom = UDim.new(0, 3)
+    bindAutoY(fieldScroll, fsLay, 6)
 
     local fieldBtns = {}
     local function updateFieldBtns()
@@ -1036,14 +1055,12 @@ local function createUI()
 
     local statsSplit = Instance.new("Frame", statsTab)
     statsSplit.Size             = UDim2.new(1, 0, 0, 0)
-    statsSplit.AutomaticSize    = Enum.AutomaticSize.Y
     statsSplit.BackgroundTransparency = 1
     statsSplit.BorderSizePixel  = 0
     statsSplit.LayoutOrder      = 1
 
     local statsLeft = Instance.new("Frame", statsSplit)
     statsLeft.Size             = UDim2.new(0.48, -3, 0, 0)
-    statsLeft.AutomaticSize    = Enum.AutomaticSize.Y
     statsLeft.BackgroundTransparency = 1
     statsLeft.BorderSizePixel  = 0
     local slLay = Instance.new("UIListLayout", statsLeft)
@@ -1051,12 +1068,15 @@ local function createUI()
 
     local statsRight = Instance.new("Frame", statsSplit)
     statsRight.Size             = UDim2.new(0.52, -1, 0, 0)
-    statsRight.AutomaticSize    = Enum.AutomaticSize.Y
     statsRight.Position         = UDim2.new(0.48, 4, 0, 0)
     statsRight.BackgroundTransparency = 1
     statsRight.BorderSizePixel  = 0
     local srLay = Instance.new("UIListLayout", statsRight)
     srLay.Padding = UDim.new(0, 4); srLay.SortOrder = Enum.SortOrder.LayoutOrder
+
+    bindAutoY(statsLeft, slLay)
+    bindAutoY(statsRight, srLay)
+    bindSplitY(statsSplit, slLay, srLay)
 
     -- Interval toggle
     local toggleBtn = mkButton(statsLeft, "📅 Session Total", C.accentDim, 1, 22)
@@ -1111,14 +1131,12 @@ local function createUI()
 
     local boostGrid = Instance.new("Frame", boostTab)
     boostGrid.Size             = UDim2.new(1, 0, 0, 0)
-    boostGrid.AutomaticSize    = Enum.AutomaticSize.Y
     boostGrid.BackgroundTransparency = 1
     boostGrid.BorderSizePixel  = 0
     boostGrid.LayoutOrder      = 1
 
     local bLeft = Instance.new("Frame", boostGrid)
     bLeft.Size             = UDim2.new(0.5, -3, 0, 0)
-    bLeft.AutomaticSize    = Enum.AutomaticSize.Y
     bLeft.BackgroundTransparency = 1
     bLeft.BorderSizePixel  = 0
     local blLay = Instance.new("UIListLayout", bLeft)
@@ -1126,12 +1144,15 @@ local function createUI()
 
     local bRight = Instance.new("Frame", boostGrid)
     bRight.Size             = UDim2.new(0.5, -1, 0, 0)
-    bRight.AutomaticSize    = Enum.AutomaticSize.Y
     bRight.Position         = UDim2.new(0.5, 4, 0, 0)
     bRight.BackgroundTransparency = 1
     bRight.BorderSizePixel  = 0
     local brLay = Instance.new("UIListLayout", bRight)
     brLay.Padding = UDim.new(0, 3); brLay.SortOrder = Enum.SortOrder.LayoutOrder
+
+    bindAutoY(bLeft, blLay)
+    bindAutoY(bRight, brLay)
+    bindSplitY(boostGrid, blLay, brLay)
 
     for i, bName in ipairs(BoosterOrder) do
         local col = (i <= math.ceil(#BoosterOrder / 2)) and bLeft or bRight
@@ -1172,12 +1193,15 @@ local function createUI()
     chainOuterScroll.BorderSizePixel       = 0
     chainOuterScroll.ScrollBarThickness    = 3
     chainOuterScroll.ScrollBarImageColor3  = C.accentDim
-    chainOuterScroll.AutomaticCanvasSize   = Enum.AutomaticSize.Y
     chainOuterScroll.CanvasSize            = UDim2.new(0, 0, 0, 0)
     chainOuterScroll.LayoutOrder           = 2
     local chainOuterLay = Instance.new("UIListLayout", chainOuterScroll)
     chainOuterLay.Padding   = UDim.new(0, 5)
     chainOuterLay.SortOrder = Enum.SortOrder.LayoutOrder
+    
+    chainOuterLay:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        chainOuterScroll.CanvasSize = UDim2.new(0, 0, 0, chainOuterLay.AbsoluteContentSize.Y + 20)
+    end)
     local chainOuterPad = Instance.new("UIPadding", chainOuterScroll)
     chainOuterPad.PaddingLeft   = UDim.new(0, 2)
     chainOuterPad.PaddingRight  = UDim.new(0, 4)
@@ -1242,12 +1266,11 @@ local function createUI()
         for ci, chain in ipairs(planterChains) do
             local capturedId = chain.id
 
-            -- Card frame — AutomaticSize so it grows with slots
+            -- Card frame
             local card = Instance.new("Frame", chainOuterScroll)
             card.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
             card.BorderSizePixel  = 0
             card.LayoutOrder      = ci
-            card.AutomaticSize    = Enum.AutomaticSize.Y
             card.Size             = UDim2.new(1, 0, 0, 0)
             Instance.new("UICorner", card).CornerRadius = UDim.new(0, 6)
             local stroke = Instance.new("UIStroke", card)
@@ -1263,6 +1286,11 @@ local function createUI()
             cardPad.PaddingRight  = UDim.new(0, 5)
             cardPad.PaddingTop    = UDim.new(0, 4)
             cardPad.PaddingBottom = UDim.new(0, 4)
+            
+            cardList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+                card.Size = UDim2.new(1, 0, 0, cardList.AbsoluteContentSize.Y + 8)
+            end)
+            task.defer(function() card.Size = UDim2.new(1, 0, 0, cardList.AbsoluteContentSize.Y + 8) end)
 
             -- ── Header row ──────────────────────────────────
             local hdr = Instance.new("Frame", card)
@@ -1525,14 +1553,12 @@ local function createUI()
 
     local cfgSplit = Instance.new("Frame", cfgTab)
     cfgSplit.Size             = UDim2.new(1, 0, 0, 0)
-    cfgSplit.AutomaticSize    = Enum.AutomaticSize.Y
     cfgSplit.BackgroundTransparency = 1
     cfgSplit.BorderSizePixel  = 0
     cfgSplit.LayoutOrder      = 1
 
     local cfgLeft = Instance.new("Frame", cfgSplit)
     cfgLeft.Size             = UDim2.new(0.5, -4, 0, 0)
-    cfgLeft.AutomaticSize    = Enum.AutomaticSize.Y
     cfgLeft.BackgroundTransparency = 1
     cfgLeft.BorderSizePixel  = 0
     local cfgLLay = Instance.new("UIListLayout", cfgLeft)
@@ -1540,12 +1566,15 @@ local function createUI()
 
     local cfgRight = Instance.new("Frame", cfgSplit)
     cfgRight.Size             = UDim2.new(0.5, -2, 0, 0)
-    cfgRight.AutomaticSize    = Enum.AutomaticSize.Y
     cfgRight.Position         = UDim2.new(0.5, 6, 0, 0)
     cfgRight.BackgroundTransparency = 1
     cfgRight.BorderSizePixel  = 0
     local cfgRLay = Instance.new("UIListLayout", cfgRight)
     cfgRLay.Padding = UDim.new(0, 4); cfgRLay.SortOrder = Enum.SortOrder.LayoutOrder
+
+    bindAutoY(cfgLeft, cfgLLay)
+    bindAutoY(cfgRight, cfgRLay)
+    bindSplitY(cfgSplit, cfgLLay, cfgRLay)
 
     mkHeader(cfgLeft, "🎈 BALLOON", 1)
     local balloonForeverBtn = mkButton(cfgLeft, "Ignore: OFF (claim)", C.greenDark, 2, 24)
